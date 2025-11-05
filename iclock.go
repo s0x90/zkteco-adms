@@ -1,3 +1,22 @@
+// Package zkdevicesync provides an implementation of the iClock protocol
+// for ZKTeco biometric attendance devices.
+//
+// The iClock protocol is an HTTP-based protocol used by ZKTeco devices to
+// communicate with servers for sending attendance data and receiving commands.
+//
+// Basic usage:
+//
+//	server := zkdevicesync.NewIClockServer()
+//	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
+//	    fmt.Printf("User %s at %s\n", record.UserID, record.Timestamp)
+//	}
+//	http.Handle("/iclock/", server)
+//	http.ListenAndServe(":8080", nil)
+//
+// The server implements three main endpoints:
+//   - /iclock/cdata - receives attendance logs and device data
+//   - /iclock/getrequest - handles device polling for commands
+//   - /iclock/devicecmd - receives command execution confirmations
 package zkdevicesync
 
 import (
