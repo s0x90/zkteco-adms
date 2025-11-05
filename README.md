@@ -1,1 +1,1 @@
-Repository for go-lang lib for ZKTeco device pulling
+Go-lang lib for ZKTeco devices integration
