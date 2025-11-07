@@ -1,3 +1,6 @@
+//go:build basic_server
+// +build basic_server
+
 package main
 
 import (
