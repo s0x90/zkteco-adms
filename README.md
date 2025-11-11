@@ -8,10 +8,11 @@ This library provides a complete implementation of the HTTP-based iClock protoco
 
 ## Features
 
-- **Full iClock Protocol Support**: Implements all standard endpoints (`/iclock/cdata`, `/iclock/getrequest`, `/iclock/devicecmd`)
+- **Full iClock Protocol Support**: Implements all standard endpoints (`/iclock/cdata`, `/iclock/getrequest`, `/iclock/devicecmd`) plus device registry and inspection endpoints
 - **Attendance Data Processing**: Parses and processes attendance logs with multiple timestamp formats
 - **Device Management**: Thread-safe device registration and tracking
 - **Command Queuing**: Queue and send commands to devices remotely
+- **Heartbeat & Online Status**: Tracks last activity per device and exposes online/offline status
 - **Concurrent-Safe**: Built with goroutine-safe data structures
 - **Extensible**: Easy-to-use callbacks for custom business logic
 
@@ -137,8 +138,10 @@ Or handle individual endpoints:
 
 ```go
 http.HandleFunc("/iclock/cdata", server.HandleCData)
+http.HandleFunc("/iclock/registry", server.HandleRegistry) // Device registry/capabilities
 http.HandleFunc("/iclock/getrequest", server.HandleGetRequest)
 http.HandleFunc("/iclock/devicecmd", server.HandleDeviceCmd)
+http.HandleFunc("/iclock/inspect", server.HandleInspect)   // JSON snapshot of devices
 ```
 
 ## Protocol Details
@@ -147,9 +150,45 @@ http.HandleFunc("/iclock/devicecmd", server.HandleDeviceCmd)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/iclock/cdata` | POST | Receives attendance logs (ATTLOG) and operation logs (OPERLOG) |
+| `/iclock/cdata` | GET/POST | Receives attendance logs (ATTLOG) and operation logs (OPERLOG). Also accepts device info POSTs |
+| `/iclock/registry` | GET/POST | Device registration and capability payloads (key=value comma-separated) |
 | `/iclock/getrequest` | GET | Device polls for pending commands |
 | `/iclock/devicecmd` | POST | Device reports command execution results |
+| `/iclock/inspect` | GET | Returns JSON summary of devices and their current status |
+### Registry Payload Parsing
+
+Some ZKTeco devices POST a registry body containing comma-separated `key=value` pairs, e.g.:
+
+```
+DeviceType=acc,~DeviceName=SpeedFace-V5L-RFID[TI],FirmVer=ZAM180...,IPAddress=192.168.1.201
+```
+
+Notes:
+- Keys can be prefixed with `~`. The tilde is stripped when parsed.
+- Values are stored into `Device.Options` for subsequent inspection.
+- The handler merges all parsed keys into the registered device.
+
+Callback hook:
+
+```go
+server.OnRegistry = func(sn string, info map[string]string) {
+        // handle registry info (subset of device capabilities/config)
+}
+```
+
+### Heartbeat and Online Status
+
+The server updates `Device.LastActivity` at each request from the device (`/iclock/cdata`, `/iclock/registry`, `/iclock/getrequest`, `/iclock/devicecmd`) and marks the device online.
+
+- A device is considered online if its last activity is within the last 2 minutes.
+- The `/iclock/inspect` endpoint reports for each device:
+    - `serial`: device serial number
+    - `lastActivity`: RFC3339 timestamp of last activity
+    - `online`: boolean derived from last activity
+    - `options`: the registry/options map
+
+You can adjust the online threshold in code by changing the 2-minute window.
+
 
 ### Attendance Record Format
 
@@ -194,8 +233,7 @@ See the [examples](./examples) directory for complete examples:
 ### Running Examples
 
 ```bash
-cd examples
-go run basic_server.go
+go run -tags basic_server ./examples/basic_server.go
 ```
 
 Then configure your ZKTeco device to connect to:

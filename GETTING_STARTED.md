@@ -163,13 +163,23 @@ server.SendCommand("DEVICE001", "CLEAR DATA")
 
 ## Monitoring Connected Devices
 
+In addition to the simple text endpoint below, the library provides a JSON inspection endpoint you can register:
+
+```go
+http.HandleFunc("/iclock/inspect", server.HandleInspect)
+```
+
+This will return a JSON snapshot with devices, lastActivity (RFC3339), online flag, and parsed options (from registry).
+
 ```go
 http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
     devices := server.ListDevices()
     for _, device := range devices {
-        fmt.Fprintf(w, "Device: %s, Last Seen: %s\n",
+        online := time.Since(device.LastActivity) <= 2*time.Minute
+        fmt.Fprintf(w, "Device: %s, Last Seen: %s, Online: %t\n",
             device.SerialNumber,
-            device.LastActivity)
+            device.LastActivity.Format(time.RFC3339),
+            online)
     }
 })
 ```
@@ -185,6 +195,10 @@ curl -X POST "http://localhost:8080/iclock/cdata?SN=TEST001&table=ATTLOG" \
 
 # Check server for commands
 curl "http://localhost:8080/iclock/getrequest?SN=TEST001"
+
+# Simulate device registry payload (capabilities/options)
+curl -X POST "http://localhost:8080/iclock/registry?SN=TEST001" \
+    -d "DeviceType=acc,~DeviceName=SpeedFace,IPAddress=192.168.1.201"
 ```
 
 ## Troubleshooting

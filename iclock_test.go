@@ -2,6 +2,7 @@ package zkdevicesync
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,6 +234,8 @@ func TestServeHTTP(t *testing.T) {
 		{"cdata endpoint", "/iclock/cdata?SN=TEST001", http.StatusOK},
 		{"getrequest endpoint", "/iclock/getrequest?SN=TEST001", http.StatusOK},
 		{"devicecmd endpoint", "/iclock/devicecmd?SN=TEST001", http.StatusOK},
+		{"registry endpoint", "/iclock/registry?SN=TEST001", http.StatusOK},
+		{"inspect endpoint", "/iclock/inspect", http.StatusOK},
 		{"unknown endpoint", "/iclock/unknown", http.StatusNotFound},
 	}
 	
@@ -247,6 +250,73 @@ func TestServeHTTP(t *testing.T) {
 				t.Errorf("Expected status %d, got %d", tc.wantCode, w.Code)
 			}
 		})
+	}
+}
+
+func TestHandleRegistry_PostParsesBody(t *testing.T) {
+	server := NewIClockServer()
+	body := "DeviceType=acc,~DeviceName=SpeedFace,IPAddress=192.168.1.201"
+	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	dev := server.GetDevice("REG001")
+	if dev == nil {
+		t.Fatal("device should be registered")
+	}
+	if dev.Options["DeviceType"] != "acc" {
+		t.Errorf("expected DeviceType=acc, got %s", dev.Options["DeviceType"])
+	}
+	if dev.Options["DeviceName"] != "SpeedFace" {
+		t.Errorf("expected DeviceName=SpeedFace, got %s", dev.Options["DeviceName"])
+	}
+	if dev.Options["IPAddress"] != "192.168.1.201" {
+		t.Errorf("expected IPAddress parsed")
+	}
+}
+
+func TestHandleInspect_JSON(t *testing.T) {
+	server := NewIClockServer()
+	server.RegisterDevice("A1")
+	// Mark old activity to test offline
+	server.devicesMutex.Lock()
+	server.devices["A1"].LastActivity = time.Now().Add(-3 * time.Minute)
+	server.devicesMutex.Unlock()
+
+	req := httptest.NewRequest("GET", "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("expected JSON content-type, got %s", ct)
+	}
+	var payload struct {
+		Devices []struct {
+			Serial string `json:"serial"`
+			Online bool   `json:"online"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if len(payload.Devices) == 0 {
+		t.Fatalf("expected at least one device")
+	}
+	if payload.Devices[0].Online {
+		t.Errorf("expected device to be offline due to stale activity")
+	}
+}
+
+func TestParseRegistryBody(t *testing.T) {
+	server := NewIClockServer()
+	body := "Key1=Val1, ~Key2=Val2,~Key3=Val3"
+	info := server.parseRegistryBody(body)
+	if info["Key1"] != "Val1" || info["Key2"] != "Val2" || info["Key3"] != "Val3" {
+		t.Errorf("unexpected parse result: %#v", info)
 	}
 }
 
