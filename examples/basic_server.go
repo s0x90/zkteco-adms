@@ -37,6 +37,20 @@ func main() {
 		fmt.Println("---")
 	}
 
+	// Registry callback (capabilities/config)
+	server.OnRegistry = func(sn string, info map[string]string) {
+		fmt.Printf("Registry Info for %s (partial):\n", sn)
+		shown := 0
+		for k, v := range info {
+			fmt.Printf("  %s: %s\n", k, v)
+			shown++
+			if shown >= 8 { // avoid spamming console
+				break
+			}
+		}
+		fmt.Println("---")
+	}
+
 	// Register some known devices (optional)
 	server.RegisterDevice("DEVICE001")
 	server.RegisterDevice("DEVICE002")
@@ -81,8 +95,10 @@ func main() {
 	fmt.Printf("ZKTeco iClock Server starting on %s\n", addr)
 	fmt.Println("Endpoints:")
 	fmt.Println("  /iclock/cdata - Attendance data endpoint")
+	fmt.Println("  /iclock/registry - Device registry/capabilities endpoint")
 	fmt.Println("  /iclock/getrequest - Device polling endpoint")
 	fmt.Println("  /iclock/devicecmd - Command confirmation endpoint")
+	fmt.Println("  /iclock/inspect - JSON device snapshot")
 	fmt.Println("  /status - View connected devices")
 	fmt.Println("  /command - Send commands to devices (POST)")
 	fmt.Println()
