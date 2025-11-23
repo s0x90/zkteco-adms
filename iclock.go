@@ -44,22 +44,22 @@ type Device struct {
 type AttendanceRecord struct {
 	UserID       string
 	Timestamp    time.Time
-	Status       int    // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, etc.
-	VerifyMode   int    // 0=Password, 1=Fingerprint, 2=Card, etc.
+	Status       int // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, etc.
+	VerifyMode   int // 0=Password, 1=Fingerprint, 2=Card, etc.
 	WorkCode     string
 	SerialNumber string
 }
 
 // IClockServer manages communication with ZKTeco devices using the iclock protocol
 type IClockServer struct {
-	devices       map[string]*Device
-	devicesMutex  sync.RWMutex
-	commandQueue  map[string][]string // Serial number -> commands queue
-	queueMutex    sync.RWMutex
-	OnAttendance  func(record AttendanceRecord)
-	OnDeviceInfo  func(sn string, info map[string]string)
-	OnRegistry    func(sn string, info map[string]string)
-	logger        *log.Logger
+	devices      map[string]*Device
+	devicesMutex sync.RWMutex
+	commandQueue map[string][]string // Serial number -> commands queue
+	queueMutex   sync.RWMutex
+	OnAttendance func(record AttendanceRecord)
+	OnDeviceInfo func(sn string, info map[string]string)
+	OnRegistry   func(sn string, info map[string]string)
+	logger       *log.Logger
 }
 
 // NewIClockServer creates a new iclock server instance
@@ -85,6 +85,7 @@ func (s *IClockServer) RegisterDevice(serialNumber string) {
 		}
 	}
 }
+
 // GetDevice retrieves device information
 func (s *IClockServer) GetDevice(serialNumber string) *Device {
 	s.devicesMutex.RLock()
@@ -96,7 +97,7 @@ func (s *IClockServer) GetDevice(serialNumber string) *Device {
 func (s *IClockServer) QueueCommand(serialNumber, command string) {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
-	
+
 	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], command)
 }
 
@@ -104,7 +105,7 @@ func (s *IClockServer) QueueCommand(serialNumber, command string) {
 func (s *IClockServer) GetCommands(serialNumber string) []string {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
-	
+
 	commands := s.commandQueue[serialNumber]
 	s.commandQueue[serialNumber] = nil // Clear the queue
 	return commands
@@ -137,7 +138,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 
 	// Handle different table types
 	table := r.Form.Get("table")
-	
+
 	switch table {
 	case "ATTLOG":
 		// Parse attendance log data
@@ -146,7 +147,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to read body", http.StatusBadRequest)
 			return
 		}
-		
+
 		// Log truncated body size/content
 		if len(body) > 0 {
 			preview := string(body)
@@ -162,15 +163,15 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				s.OnAttendance(record)
 			}
 		}
-		
+
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK: %d", len(records))
-		
+
 	case "OPERLOG":
 		// Operation log - acknowledge
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "OK")
-		
+
 	default:
 		// Handle INFO or other requests
 		if r.Method == "POST" {
@@ -187,7 +188,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				s.logger.Printf("[iClock Protocol]   INFO body (truncated): %s", preview)
 			}
 		}
-		
+
 		// Check for pending commands
 		commands := s.GetCommands(serialNumber)
 		if len(commands) > 0 {
@@ -259,7 +260,7 @@ func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Printf("[iClock Protocol]   devicecmd body (truncated): %s", preview)
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "OK: Command received: %s", string(body))
 }
@@ -323,14 +324,14 @@ func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) 
 // parseDeviceInfo parses device information from POST data
 func (s *IClockServer) parseDeviceInfo(data string) map[string]string {
 	info := make(map[string]string)
-	
+
 	lines := strings.Split(strings.TrimSpace(data), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || !strings.Contains(line, "=") {
 			continue
 		}
-		
+
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
 			key := strings.TrimSpace(parts[0])
@@ -338,7 +339,7 @@ func (s *IClockServer) parseDeviceInfo(data string) map[string]string {
 			info[key] = value
 		}
 	}
-	
+
 	return info
 }
 
@@ -360,6 +361,7 @@ func (s *IClockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
 // SendCommand sends a command to a device (to be retrieved on next poll)
 func (s *IClockServer) SendCommand(serialNumber, command string) {
 	s.QueueCommand(serialNumber, command)
@@ -382,14 +384,14 @@ func ParseQueryParams(urlStr string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	params := make(map[string]string)
 	for key, values := range u.Query() {
 		if len(values) > 0 {
 			params[key] = values[0]
 		}
 	}
-	
+
 	return params, nil
 }
 
@@ -397,12 +399,12 @@ func ParseQueryParams(urlStr string) (map[string]string, error) {
 func (s *IClockServer) ListDevices() []*Device {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
-	
+
 	devices := make([]*Device, 0, len(s.devices))
 	for _, device := range s.devices {
 		devices = append(devices, device)
 	}
-	
+
 	return devices
 }
 
@@ -461,7 +463,7 @@ func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	}{Devices: []map[string]interface{}{}, Time: time.Now()}
 	for _, d := range s.devices {
 		devMap := map[string]interface{}{
-			"serial":      d.SerialNumber,
+			"serial":       d.SerialNumber,
 			"lastActivity": d.LastActivity.Format(time.RFC3339),
 			"online":       s.isDeviceOnline(d),
 			"options":      d.Options,
