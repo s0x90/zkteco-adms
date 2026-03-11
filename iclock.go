@@ -31,7 +31,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -90,8 +89,8 @@ type IClockServer struct {
 
 	callbackCh   chan func()
 	callbackDone chan struct{}
+	closeCh      chan struct{}
 	closeOnce    sync.Once
-	closed       atomic.Bool
 }
 
 // NewIClockServer creates a new iclock server instance.
@@ -103,6 +102,7 @@ func NewIClockServer() *IClockServer {
 		logger:       log.Default(),
 		callbackCh:   make(chan func(), 256),
 		callbackDone: make(chan struct{}),
+		closeCh:      make(chan struct{}),
 	}
 	go s.callbackWorker()
 	return s
@@ -113,8 +113,7 @@ func NewIClockServer() *IClockServer {
 // Close is safe to call multiple times.
 func (s *IClockServer) Close() {
 	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		close(s.callbackCh)
+		close(s.closeCh)
 		<-s.callbackDone
 	})
 }
@@ -123,8 +122,21 @@ func (s *IClockServer) Close() {
 // Panics in user callbacks are recovered so the worker stays alive.
 func (s *IClockServer) callbackWorker() {
 	defer close(s.callbackDone)
-	for fn := range s.callbackCh {
-		s.safeCall(fn)
+	for {
+		select {
+		case fn := <-s.callbackCh:
+			s.safeCall(fn)
+		case <-s.closeCh:
+			// Drain remaining callbacks before exiting.
+			for {
+				select {
+				case fn := <-s.callbackCh:
+					s.safeCall(fn)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -141,11 +153,10 @@ func (s *IClockServer) safeCall(fn func()) {
 // dispatchCallback enqueues a callback for asynchronous execution.
 // If the callback channel is full or the server is closed, the event is dropped.
 func (s *IClockServer) dispatchCallback(fn func()) {
-	if s.closed.Load() {
-		return
-	}
 	select {
 	case s.callbackCh <- fn:
+	case <-s.closeCh:
+		// Server is closing, drop the callback.
 	default:
 		s.logger.Printf("[Callback] WARNING: callback queue full, dropping event")
 	}
@@ -571,23 +582,29 @@ func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.devicesMutex.RLock()
-	defer s.devicesMutex.RUnlock()
 	snapshot := struct {
 		Devices []DeviceSnapshot `json:"devices"`
 		Count   int              `json:"count"`
 		Time    time.Time        `json:"time"`
 	}{Devices: []DeviceSnapshot{}, Time: time.Now()}
+
+	s.devicesMutex.RLock()
 	for _, d := range s.devices {
+		opts := make(map[string]string, len(d.Options))
+		for k, v := range d.Options {
+			opts[k] = v
+		}
 		snap := DeviceSnapshot{
 			Serial:       d.SerialNumber,
 			LastActivity: d.LastActivity.Format(time.RFC3339),
 			Online:       s.isDeviceOnline(d),
-			Options:      d.Options,
+			Options:      opts,
 		}
 		snapshot.Devices = append(snapshot.Devices, snap)
 	}
 	snapshot.Count = len(snapshot.Devices)
+	s.devicesMutex.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)
