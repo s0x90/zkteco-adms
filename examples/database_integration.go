@@ -8,7 +8,6 @@ import (
 	"time"
 
 	zkdevicesync "github.com/s0x90/zk-device-sync"
-	
 	// Uncomment when using actual database
 	// _ "github.com/lib/pq"
 )
@@ -34,14 +33,14 @@ func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) e
 
 	// In a real application, you would insert into a database:
 	/*
-		query := `INSERT INTO attendance_records 
+		query := `INSERT INTO attendance_records
 				  (user_id, timestamp, status, verify_mode, work_code, device_sn)
 				  VALUES (?, ?, ?, ?, ?, ?)`
-		_, err := s.db.Exec(query, 
-			record.UserID, 
-			record.Timestamp, 
+		_, err := s.db.Exec(query,
+			record.UserID,
+			record.Timestamp,
 			record.Status,
-			record.VerifyMode, 
+			record.VerifyMode,
 			record.WorkCode,
 			record.SerialNumber)
 		return err
@@ -58,7 +57,7 @@ func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) e
 func (s *AttendanceStore) GetRecords() []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	result := make([]zkdevicesync.AttendanceRecord, len(s.records))
 	copy(result, s.records)
 	return result
@@ -68,7 +67,7 @@ func (s *AttendanceStore) GetRecords() []zkdevicesync.AttendanceRecord {
 func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	var result []zkdevicesync.AttendanceRecord
 	for _, record := range s.records {
 		if record.UserID == userID {
@@ -82,7 +81,7 @@ func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.Attenda
 func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	var result []zkdevicesync.AttendanceRecord
 	for _, record := range s.records {
 		if record.Timestamp.After(start) && record.Timestamp.Before(end) {
@@ -98,6 +97,7 @@ func main() {
 
 	// Create the iclock server
 	server := zkdevicesync.NewIClockServer()
+	defer server.Close()
 
 	// Set up attendance callback to save to database
 	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
@@ -117,9 +117,9 @@ func main() {
 	// API endpoint to query attendance records
 	http.HandleFunc("/api/attendance", func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
-		
+
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		if userID != "" {
 			records := store.GetRecordsByUser(userID)
 			fmt.Fprintf(w, `{"user_id": "%s", "count": %d, "records": [`, userID, len(records))
@@ -155,13 +155,13 @@ func main() {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
-		
+
 		records := store.GetRecordsByDateRange(startOfDay, endOfDay)
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"date": "%s", "count": %d, "records": [`,
 			startOfDay.Format("2006-01-02"), len(records))
-		
+
 		for i, record := range records {
 			if i > 0 {
 				fmt.Fprint(w, ",")
@@ -180,7 +180,7 @@ func main() {
 	log.Println("  /iclock/* - ZKTeco device endpoints")
 	log.Println("  /api/attendance - Query attendance records")
 	log.Println("  /api/summary/today - Get today's attendance summary")
-	
+
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func initDB() (*sql.DB, error) {
 		INDEX idx_device_timestamp (device_sn, timestamp)
 	);
 	`
-	
+
 	_, err = db.Exec(schema)
 	return db, err
 }
