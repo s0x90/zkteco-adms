@@ -774,6 +774,84 @@ func TestAttendanceRecordSerialNumber(t *testing.T) {
 	}
 }
 
+func TestCallbackNilAfterEnqueue(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	received := make(chan AttendanceRecord, 1)
+	server.OnAttendance = func(record AttendanceRecord) {
+		received <- record
+	}
+
+	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	// Nil the callback after the request was handled (closure already enqueued).
+	// With the captured-local fix this must not panic.
+	server.OnAttendance = nil
+
+	select {
+	case rec := <-received:
+		if rec.UserID != "123" {
+			t.Errorf("Expected UserID 123, got %s", rec.UserID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for attendance callback")
+	}
+}
+
+func TestCloseIdempotent(t *testing.T) {
+	server := NewIClockServer()
+	server.Close()
+	server.Close() // must not panic
+}
+
+func TestDispatchAfterClose(t *testing.T) {
+	server := NewIClockServer()
+	server.Close()
+
+	// Must not panic: dispatchCallback should detect the closed state.
+	server.dispatchCallback(func() {
+		t.Error("callback should not be executed after Close")
+	})
+}
+
+func TestCallbackPanicRecovery(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	received := make(chan string, 1)
+
+	// First callback panics.
+	server.OnAttendance = func(record AttendanceRecord) {
+		panic("boom")
+	}
+	req1 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+		bytes.NewBufferString("100\t2024-01-01 08:00:00\t0\t1\t0"))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	// Replace with a well-behaved callback.
+	server.OnAttendance = func(record AttendanceRecord) {
+		received <- record.UserID
+	}
+	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+		bytes.NewBufferString("200\t2024-01-01 09:00:00\t0\t1\t0"))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	select {
+	case uid := <-received:
+		if uid != "200" {
+			t.Errorf("Expected UserID 200, got %s", uid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not recover from panic; second callback never arrived")
+	}
+}
+
 func BenchmarkHandleCData(b *testing.B) {
 	server := NewIClockServer()
 	defer server.Close()

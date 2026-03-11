@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +90,8 @@ type IClockServer struct {
 
 	callbackCh   chan func()
 	callbackDone chan struct{}
+	closeOnce    sync.Once
+	closed       atomic.Bool
 }
 
 // NewIClockServer creates a new iclock server instance.
@@ -107,22 +110,40 @@ func NewIClockServer() *IClockServer {
 
 // Close drains the callback queue and stops the worker goroutine.
 // It blocks until all pending callbacks have been executed.
+// Close is safe to call multiple times.
 func (s *IClockServer) Close() {
-	close(s.callbackCh)
-	<-s.callbackDone
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.callbackCh)
+		<-s.callbackDone
+	})
 }
 
 // callbackWorker processes queued callbacks sequentially.
+// Panics in user callbacks are recovered so the worker stays alive.
 func (s *IClockServer) callbackWorker() {
 	defer close(s.callbackDone)
 	for fn := range s.callbackCh {
-		fn()
+		s.safeCall(fn)
 	}
 }
 
+// safeCall executes fn, recovering from any panic.
+func (s *IClockServer) safeCall(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Printf("[Callback] panic recovered: %v", r)
+		}
+	}()
+	fn()
+}
+
 // dispatchCallback enqueues a callback for asynchronous execution.
-// If the callback channel is full the event is dropped and a warning is logged.
+// If the callback channel is full or the server is closed, the event is dropped.
 func (s *IClockServer) dispatchCallback(fn func()) {
+	if s.closed.Load() {
+		return
+	}
 	select {
 	case s.callbackCh <- fn:
 	default:
@@ -230,10 +251,10 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		records := s.parseAttendanceRecords(string(body), serialNumber)
-		if s.OnAttendance != nil {
+		if cb := s.OnAttendance; cb != nil {
 			for _, record := range records {
 				rec := record // capture loop variable
-				s.dispatchCallback(func() { s.OnAttendance(rec) })
+				s.dispatchCallback(func() { cb(rec) })
 			}
 		}
 
@@ -253,10 +274,10 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Failed to read body", http.StatusBadRequest)
 				return
 			}
-			if len(body) > 0 && s.OnDeviceInfo != nil {
+			if cb := s.OnDeviceInfo; len(body) > 0 && cb != nil {
 				info := s.parseDeviceInfo(string(body))
 				sn := serialNumber
-				s.dispatchCallback(func() { s.OnDeviceInfo(sn, info) })
+				s.dispatchCallback(func() { cb(sn, info) })
 			}
 			if len(body) > 0 {
 				preview := string(body)
@@ -534,9 +555,9 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.devicesMutex.Unlock()
-		if s.OnRegistry != nil {
+		if cb := s.OnRegistry; cb != nil {
 			sn := serialNumber
-			s.dispatchCallback(func() { s.OnRegistry(sn, info) })
+			s.dispatchCallback(func() { cb(sn, info) })
 		}
 	}
 	w.WriteHeader(http.StatusOK)
