@@ -153,10 +153,16 @@ func (s *IClockServer) safeCall(fn func()) {
 // dispatchCallback enqueues a callback for asynchronous execution.
 // If the callback channel is full or the server is closed, the event is dropped.
 func (s *IClockServer) dispatchCallback(fn func()) {
+	// Fast-path: if the server is already closing/closed, drop the callback.
+	select {
+	case <-s.closeCh:
+		return
+	default:
+	}
+
+	// Server is not closed at this point; try to enqueue without blocking.
 	select {
 	case s.callbackCh <- fn:
-	case <-s.closeCh:
-		// Server is closing, drop the callback.
 	default:
 		s.logger.Printf("[Callback] WARNING: callback queue full, dropping event")
 	}
@@ -590,15 +596,12 @@ func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 
 	s.devicesMutex.RLock()
 	for _, d := range s.devices {
-		opts := make(map[string]string, len(d.Options))
-		for k, v := range d.Options {
-			opts[k] = v
-		}
+		dc := d.copy()
 		snap := DeviceSnapshot{
-			Serial:       d.SerialNumber,
-			LastActivity: d.LastActivity.Format(time.RFC3339),
+			Serial:       dc.SerialNumber,
+			LastActivity: dc.LastActivity.Format(time.RFC3339),
 			Online:       s.isDeviceOnline(d),
-			Options:      opts,
+			Options:      dc.Options,
 		}
 		snapshot.Devices = append(snapshot.Devices, snap)
 	}
