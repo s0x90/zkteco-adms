@@ -15,6 +15,7 @@ import (
 func main() {
 	// Create a new iclock server
 	server := zkdevicesync.NewIClockServer()
+	defer server.Close()
 
 	// Set up callback for attendance records
 	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
@@ -64,8 +65,10 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
 		for _, device := range devices {
+			online := server.IsDeviceOnline(device.SerialNumber)
 			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
 			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
+			fmt.Fprintf(w, "Online: %t\n", online)
 			fmt.Fprintf(w, "Options: %v\n", device.Options)
 			fmt.Fprintln(w, "---")
 		}
