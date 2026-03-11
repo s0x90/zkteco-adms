@@ -4,7 +4,7 @@ This guide will help you get started with the ZK Device Sync library for integra
 
 ## Prerequisites
 
-- Go 1.16 or higher
+- Go 1.24 or higher
 - A ZKTeco biometric device (attendance machine)
 - Network access between your server and the device
 
@@ -175,7 +175,7 @@ This will return a JSON snapshot with devices, lastActivity (RFC3339), online fl
 http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
     devices := server.ListDevices()
     for _, device := range devices {
-        online := time.Since(device.LastActivity) <= 2*time.Minute
+        online := server.IsDeviceOnline(device.SerialNumber)
         fmt.Fprintf(w, "Device: %s, Last Seen: %s, Online: %t\n",
             device.SerialNumber,
             device.LastActivity.Format(time.RFC3339),

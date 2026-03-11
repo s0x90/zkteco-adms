@@ -17,6 +17,8 @@
 //   - /iclock/cdata - receives attendance logs and device data
 //   - /iclock/getrequest - handles device polling for commands
 //   - /iclock/devicecmd - receives command execution confirmations
+//
+// Call Close when the server is no longer needed to drain the callback queue.
 package zkdevicesync
 
 import (
@@ -37,7 +39,19 @@ type Device struct {
 	SerialNumber string
 	LastActivity time.Time
 	Options      map[string]string
-	Online       bool // Heartbeat status
+}
+
+// copy returns a deep copy of the Device, including its Options map.
+func (d *Device) copy() *Device {
+	opts := make(map[string]string, len(d.Options))
+	for k, v := range d.Options {
+		opts[k] = v
+	}
+	return &Device{
+		SerialNumber: d.SerialNumber,
+		LastActivity: d.LastActivity,
+		Options:      opts,
+	}
 }
 
 // AttendanceRecord represents an attendance transaction from the device
@@ -50,7 +64,19 @@ type AttendanceRecord struct {
 	SerialNumber string
 }
 
-// IClockServer manages communication with ZKTeco devices using the iclock protocol
+// DeviceSnapshot is the JSON representation of a device in the /iclock/inspect response.
+type DeviceSnapshot struct {
+	Serial       string            `json:"serial"`
+	LastActivity string            `json:"lastActivity"`
+	Online       bool              `json:"online"`
+	Options      map[string]string `json:"options"`
+}
+
+// IClockServer manages communication with ZKTeco devices using the iclock protocol.
+//
+// Callbacks (OnAttendance, OnDeviceInfo, OnRegistry) are dispatched asynchronously
+// via an internal worker goroutine so they never block device HTTP responses.
+// Call Close to drain the callback queue when the server is shutting down.
 type IClockServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
@@ -60,14 +86,85 @@ type IClockServer struct {
 	OnDeviceInfo func(sn string, info map[string]string)
 	OnRegistry   func(sn string, info map[string]string)
 	logger       *log.Logger
+
+	callbackCh   chan func()
+	callbackDone chan struct{}
+	closeCh      chan struct{}
+	closeOnce    sync.Once
 }
 
-// NewIClockServer creates a new iclock server instance
+// NewIClockServer creates a new iclock server instance.
+// Call Close when the server is no longer needed.
 func NewIClockServer() *IClockServer {
-	return &IClockServer{
+	s := &IClockServer{
 		devices:      make(map[string]*Device),
 		commandQueue: make(map[string][]string),
 		logger:       log.Default(),
+		callbackCh:   make(chan func(), 256),
+		callbackDone: make(chan struct{}),
+		closeCh:      make(chan struct{}),
+	}
+	go s.callbackWorker()
+	return s
+}
+
+// Close drains the callback queue and stops the worker goroutine.
+// It blocks until all pending callbacks have been executed.
+// Close is safe to call multiple times.
+func (s *IClockServer) Close() {
+	s.closeOnce.Do(func() {
+		close(s.closeCh)
+		<-s.callbackDone
+	})
+}
+
+// callbackWorker processes queued callbacks sequentially.
+// Panics in user callbacks are recovered so the worker stays alive.
+func (s *IClockServer) callbackWorker() {
+	defer close(s.callbackDone)
+	for {
+		select {
+		case fn := <-s.callbackCh:
+			s.safeCall(fn)
+		case <-s.closeCh:
+			// Drain remaining callbacks before exiting.
+			for {
+				select {
+				case fn := <-s.callbackCh:
+					s.safeCall(fn)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// safeCall executes fn, recovering from any panic.
+func (s *IClockServer) safeCall(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Printf("[Callback] panic recovered: %v", r)
+		}
+	}()
+	fn()
+}
+
+// dispatchCallback enqueues a callback for asynchronous execution.
+// If the callback channel is full or the server is closed, the event is dropped.
+func (s *IClockServer) dispatchCallback(fn func()) {
+	// Fast-path: if the server is already closing/closed, drop the callback.
+	select {
+	case <-s.closeCh:
+		return
+	default:
+	}
+
+	// Server is not closed at this point; try to enqueue without blocking.
+	select {
+	case s.callbackCh <- fn:
+	default:
+		s.logger.Printf("[Callback] WARNING: callback queue full, dropping event")
 	}
 }
 
@@ -81,16 +178,28 @@ func (s *IClockServer) RegisterDevice(serialNumber string) {
 			SerialNumber: serialNumber,
 			LastActivity: time.Now(),
 			Options:      make(map[string]string),
-			Online:       true,
 		}
 	}
 }
 
-// GetDevice retrieves device information
+// GetDevice retrieves a copy of device information.
+// Returns nil if the device is not registered.
 func (s *IClockServer) GetDevice(serialNumber string) *Device {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
-	return s.devices[serialNumber]
+	d := s.devices[serialNumber]
+	if d == nil {
+		return nil
+	}
+	return d.copy()
+}
+
+// IsDeviceOnline reports whether the device has been active within the last 2 minutes.
+func (s *IClockServer) IsDeviceOnline(serialNumber string) bool {
+	s.devicesMutex.RLock()
+	defer s.devicesMutex.RUnlock()
+	d := s.devices[serialNumber]
+	return s.isDeviceOnline(d)
 }
 
 // QueueCommand adds a command to be sent to the device
@@ -107,18 +216,19 @@ func (s *IClockServer) GetCommands(serialNumber string) []string {
 	defer s.queueMutex.Unlock()
 
 	commands := s.commandQueue[serialNumber]
-	s.commandQueue[serialNumber] = nil // Clear the queue
+	delete(s.commandQueue, serialNumber)
 	return commands
 }
 
 // HandleCData handles the /iclock/cdata endpoint for attendance data
 func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form data", http.StatusBadRequest)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	serialNumber := r.Form.Get("SN")
+	query := r.URL.Query()
+	serialNumber := query.Get("SN")
 	if serialNumber == "" {
 		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
 		return
@@ -131,13 +241,13 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	// Logging basic request info
 	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag", "table"} {
-		if v := r.Form.Get(k); v != "" {
+		if v := query.Get(k); v != "" {
 			s.logger.Printf("[iClock Protocol]   %s: %s", k, v)
 		}
 	}
 
 	// Handle different table types
-	table := r.Form.Get("table")
+	table := query.Get("table")
 
 	switch table {
 	case "ATTLOG":
@@ -158,9 +268,10 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		records := s.parseAttendanceRecords(string(body), serialNumber)
-		if s.OnAttendance != nil {
+		if cb := s.OnAttendance; cb != nil {
 			for _, record := range records {
-				s.OnAttendance(record)
+				rec := record // capture loop variable
+				s.dispatchCallback(func() { cb(rec) })
 			}
 		}
 
@@ -174,11 +285,16 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		// Handle INFO or other requests
-		if r.Method == "POST" {
-			body, _ := io.ReadAll(r.Body)
-			if len(body) > 0 && s.OnDeviceInfo != nil {
+		if r.Method == http.MethodPost {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "Failed to read body", http.StatusBadRequest)
+				return
+			}
+			if cb := s.OnDeviceInfo; len(body) > 0 && cb != nil {
 				info := s.parseDeviceInfo(string(body))
-				s.OnDeviceInfo(serialNumber, info)
+				sn := serialNumber
+				s.dispatchCallback(func() { cb(sn, info) })
 			}
 			if len(body) > 0 {
 				preview := string(body)
@@ -205,12 +321,12 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetRequest handles the /iclock/getrequest endpoint
 func (s *IClockServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form data", http.StatusBadRequest)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	serialNumber := r.Form.Get("SN")
+	serialNumber := r.URL.Query().Get("SN")
 	if serialNumber == "" {
 		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
 		return
@@ -236,23 +352,28 @@ func (s *IClockServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) 
 
 // HandleDeviceCmd handles the /iclock/devicecmd endpoint
 func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form data", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	serialNumber := r.Form.Get("SN")
+	serialNumber := r.URL.Query().Get("SN")
 	if serialNumber == "" {
 		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
 		return
 	}
 
+	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
 
 	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 
 	// Device is reporting command execution result
-	body, _ := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
 	if len(body) > 0 {
 		preview := string(body)
 		if len(preview) > 200 {
@@ -271,9 +392,9 @@ func (s *IClockServer) updateDeviceActivity(serialNumber string) {
 	defer s.devicesMutex.Unlock()
 
 	if device, exists := s.devices[serialNumber]; exists {
+		wasOnline := s.isDeviceOnline(device)
 		device.LastActivity = time.Now()
-		if !device.Online {
-			device.Online = true
+		if !wasOnline {
 			s.logger.Printf("[Heartbeat] Device %s marked as online", serialNumber)
 		} else {
 			s.logger.Printf("[Heartbeat] Device %s activity", serialNumber)
@@ -395,14 +516,15 @@ func ParseQueryParams(urlStr string) (map[string]string, error) {
 	return params, nil
 }
 
-// ListDevices returns all registered devices
+// ListDevices returns copies of all registered devices.
+// The returned slice and Device values are safe to use without additional locking.
 func (s *IClockServer) ListDevices() []*Device {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
 
 	devices := make([]*Device, 0, len(s.devices))
 	for _, device := range s.devices {
-		devices = append(devices, device)
+		devices = append(devices, device.copy())
 	}
 
 	return devices
@@ -412,11 +534,13 @@ func (s *IClockServer) ListDevices() []*Device {
 
 // HandleRegistry processes /iclock/registry requests for device registration & capabilities
 func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form data", http.StatusBadRequest)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	serialNumber := r.Form.Get("SN")
+
+	query := r.URL.Query()
+	serialNumber := query.Get("SN")
 	if serialNumber == "" {
 		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
 		return
@@ -425,11 +549,15 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 	s.updateDeviceActivity(serialNumber)
 	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag"} {
-		if v := r.Form.Get(k); v != "" {
+		if v := query.Get(k); v != "" {
 			s.logger.Printf("[iClock Protocol]   %s: %s", k, v)
 		}
 	}
-	body, _ := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
 	if len(body) > 0 {
 		preview := string(body)
 		if len(preview) > 300 {
@@ -444,8 +572,9 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.devicesMutex.Unlock()
-		if s.OnRegistry != nil {
-			s.OnRegistry(serialNumber, info)
+		if cb := s.OnRegistry; cb != nil {
+			sn := serialNumber
+			s.dispatchCallback(func() { cb(sn, info) })
 		}
 	}
 	w.WriteHeader(http.StatusOK)
@@ -454,23 +583,31 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 
 // HandleInspect serves /iclock/inspect returning JSON device snapshot
 func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
-	s.devicesMutex.RLock()
-	defer s.devicesMutex.RUnlock()
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	snapshot := struct {
-		Devices []map[string]interface{} `json:"devices"`
-		Count   int                      `json:"count"`
-		Time    time.Time                `json:"time"`
-	}{Devices: []map[string]interface{}{}, Time: time.Now()}
+		Devices []DeviceSnapshot `json:"devices"`
+		Count   int              `json:"count"`
+		Time    time.Time        `json:"time"`
+	}{Devices: []DeviceSnapshot{}, Time: time.Now()}
+
+	s.devicesMutex.RLock()
 	for _, d := range s.devices {
-		devMap := map[string]interface{}{
-			"serial":       d.SerialNumber,
-			"lastActivity": d.LastActivity.Format(time.RFC3339),
-			"online":       s.isDeviceOnline(d),
-			"options":      d.Options,
+		dc := d.copy()
+		snap := DeviceSnapshot{
+			Serial:       dc.SerialNumber,
+			LastActivity: dc.LastActivity.Format(time.RFC3339),
+			Online:       s.isDeviceOnline(d),
+			Options:      dc.Options,
 		}
-		snapshot.Devices = append(snapshot.Devices, devMap)
+		snapshot.Devices = append(snapshot.Devices, snap)
 	}
 	snapshot.Count = len(snapshot.Devices)
+	s.devicesMutex.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)

@@ -12,6 +12,7 @@ import (
 
 func TestNewIClockServer(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	if server == nil {
 		t.Fatal("NewIClockServer returned nil")
 	}
@@ -25,6 +26,7 @@ func TestNewIClockServer(t *testing.T) {
 
 func TestRegisterDevice(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.RegisterDevice(serialNumber)
@@ -41,8 +43,50 @@ func TestRegisterDevice(t *testing.T) {
 	}
 }
 
+func TestGetDeviceReturnsCopy(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	server.RegisterDevice("COPY001")
+
+	d1 := server.GetDevice("COPY001")
+	d1.SerialNumber = "MUTATED"
+	d1.Options["injected"] = "bad"
+
+	d2 := server.GetDevice("COPY001")
+	if d2.SerialNumber != "COPY001" {
+		t.Errorf("Internal state was mutated: got SerialNumber %s", d2.SerialNumber)
+	}
+	if d2.Options["injected"] != "" {
+		t.Errorf("Internal Options was mutated: got injected=%s", d2.Options["injected"])
+	}
+}
+
+func TestListDevicesReturnsCopies(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	server.RegisterDevice("LD001")
+
+	devices := server.ListDevices()
+	if len(devices) != 1 {
+		t.Fatalf("Expected 1 device, got %d", len(devices))
+	}
+	devices[0].SerialNumber = "MUTATED"
+	devices[0].Options["injected"] = "bad"
+
+	fresh := server.GetDevice("LD001")
+	if fresh.SerialNumber != "LD001" {
+		t.Errorf("Internal state was mutated via ListDevices")
+	}
+	if fresh.Options["injected"] != "" {
+		t.Errorf("Internal Options was mutated via ListDevices")
+	}
+}
+
 func TestQueueAndGetCommands(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.QueueCommand(serialNumber, "INFO")
@@ -66,8 +110,25 @@ func TestQueueAndGetCommands(t *testing.T) {
 	}
 }
 
+func TestGetCommandsDeletesKey(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	server.QueueCommand("DEL001", "INFO")
+	_ = server.GetCommands("DEL001")
+
+	server.queueMutex.RLock()
+	_, exists := server.commandQueue["DEL001"]
+	server.queueMutex.RUnlock()
+
+	if exists {
+		t.Error("Expected map key to be deleted after GetCommands, but it still exists")
+	}
+}
+
 func TestHandleCData_MissingSN(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	req := httptest.NewRequest("GET", "/iclock/cdata", nil)
 	w := httptest.NewRecorder()
@@ -84,19 +145,11 @@ func TestHandleCData_MissingSN(t *testing.T) {
 
 func TestHandleCData_AttendanceLog(t *testing.T) {
 	server := NewIClockServer()
-	recordsReceived := 0
+	defer server.Close()
 
+	received := make(chan AttendanceRecord, 1)
 	server.OnAttendance = func(record AttendanceRecord) {
-		recordsReceived++
-		if record.UserID != "123" {
-			t.Errorf("Expected UserID 123, got %s", record.UserID)
-		}
-		if record.Status != 0 {
-			t.Errorf("Expected Status 0, got %d", record.Status)
-		}
-		if record.VerifyMode != 1 {
-			t.Errorf("Expected VerifyMode 1, got %d", record.VerifyMode)
-		}
+		received <- record
 	}
 
 	// Simulate attendance data
@@ -109,20 +162,33 @@ func TestHandleCData_AttendanceLog(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if recordsReceived != 1 {
-		t.Errorf("Expected 1 record received, got %d", recordsReceived)
-	}
 	if !strings.Contains(w.Body.String(), "OK") {
 		t.Errorf("Expected OK response, got: %s", w.Body.String())
+	}
+
+	select {
+	case record := <-received:
+		if record.UserID != "123" {
+			t.Errorf("Expected UserID 123, got %s", record.UserID)
+		}
+		if record.Status != 0 {
+			t.Errorf("Expected Status 0, got %d", record.Status)
+		}
+		if record.VerifyMode != 1 {
+			t.Errorf("Expected VerifyMode 1, got %d", record.VerifyMode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for attendance callback")
 	}
 }
 
 func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
 	server := NewIClockServer()
-	recordsReceived := 0
+	defer server.Close()
 
+	received := make(chan AttendanceRecord, 2)
 	server.OnAttendance = func(record AttendanceRecord) {
-		recordsReceived++
+		received <- record
 	}
 
 	// Multiple records
@@ -132,13 +198,18 @@ func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
 
 	server.HandleCData(w, req)
 
-	if recordsReceived != 2 {
-		t.Errorf("Expected 2 records received, got %d", recordsReceived)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-received:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Timed out waiting for record %d", i+1)
+		}
 	}
 }
 
 func TestHandleCData_OperationLog(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=OPERLOG", bytes.NewBufferString("operation data"))
 	w := httptest.NewRecorder()
@@ -155,6 +226,7 @@ func TestHandleCData_OperationLog(t *testing.T) {
 
 func TestHandleCData_WithPendingCommands(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.QueueCommand(serialNumber, "INFO")
@@ -174,6 +246,7 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 
 func TestHandleGetRequest(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.QueueCommand(serialNumber, "DATA QUERY USER")
@@ -193,6 +266,7 @@ func TestHandleGetRequest(t *testing.T) {
 
 func TestHandleGetRequest_NoCommands(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	req := httptest.NewRequest("GET", "/iclock/getrequest?SN=TEST001", nil)
 	w := httptest.NewRecorder()
@@ -209,6 +283,7 @@ func TestHandleGetRequest_NoCommands(t *testing.T) {
 
 func TestHandleDeviceCmd(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	req := httptest.NewRequest("POST", "/iclock/devicecmd?SN=TEST001", bytes.NewBufferString("command result"))
 	w := httptest.NewRecorder()
@@ -223,25 +298,51 @@ func TestHandleDeviceCmd(t *testing.T) {
 	}
 }
 
+func TestHandleDeviceCmd_RegistersDevice(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	// Device was never registered — HandleDeviceCmd should register it.
+	req := httptest.NewRequest("POST", "/iclock/devicecmd?SN=NEW001", bytes.NewBufferString("result"))
+	w := httptest.NewRecorder()
+
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+	device := server.GetDevice("NEW001")
+	if device == nil {
+		t.Fatal("Expected HandleDeviceCmd to register the device, but GetDevice returned nil")
+	}
+	if device.SerialNumber != "NEW001" {
+		t.Errorf("Expected serial NEW001, got %s", device.SerialNumber)
+	}
+}
+
 func TestServeHTTP(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	testCases := []struct {
 		name     string
+		method   string
 		path     string
 		wantCode int
 	}{
-		{"cdata endpoint", "/iclock/cdata?SN=TEST001", http.StatusOK},
-		{"getrequest endpoint", "/iclock/getrequest?SN=TEST001", http.StatusOK},
-		{"devicecmd endpoint", "/iclock/devicecmd?SN=TEST001", http.StatusOK},
-		{"registry endpoint", "/iclock/registry?SN=TEST001", http.StatusOK},
-		{"inspect endpoint", "/iclock/inspect", http.StatusOK},
-		{"unknown endpoint", "/iclock/unknown", http.StatusNotFound},
+		{"cdata GET", "GET", "/iclock/cdata?SN=TEST001", http.StatusOK},
+		{"cdata POST", "POST", "/iclock/cdata?SN=TEST001", http.StatusOK},
+		{"getrequest GET", "GET", "/iclock/getrequest?SN=TEST001", http.StatusOK},
+		{"devicecmd POST", "POST", "/iclock/devicecmd?SN=TEST001", http.StatusOK},
+		{"registry GET", "GET", "/iclock/registry?SN=TEST001", http.StatusOK},
+		{"registry POST", "POST", "/iclock/registry?SN=TEST001", http.StatusOK},
+		{"inspect GET", "GET", "/iclock/inspect", http.StatusOK},
+		{"unknown endpoint", "GET", "/iclock/unknown", http.StatusNotFound},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tc.path, nil)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
 			w := httptest.NewRecorder()
 
 			server.ServeHTTP(w, req)
@@ -253,8 +354,41 @@ func TestServeHTTP(t *testing.T) {
 	}
 }
 
+func TestMethodNotAllowed(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	testCases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"DELETE on cdata", "DELETE", "/iclock/cdata?SN=TEST001"},
+		{"PUT on cdata", "PUT", "/iclock/cdata?SN=TEST001"},
+		{"POST on getrequest", "POST", "/iclock/getrequest?SN=TEST001"},
+		{"GET on devicecmd", "GET", "/iclock/devicecmd?SN=TEST001"},
+		{"DELETE on registry", "DELETE", "/iclock/registry?SN=TEST001"},
+		{"POST on inspect", "POST", "/iclock/inspect"},
+		{"PUT on inspect", "PUT", "/iclock/inspect"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			w := httptest.NewRecorder()
+
+			server.ServeHTTP(w, req)
+
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Errorf("Expected 405, got %d", w.Code)
+			}
+		})
+	}
+}
+
 func TestHandleRegistry_PostParsesBody(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	body := "DeviceType=acc,~DeviceName=SpeedFace,IPAddress=192.168.1.201"
 	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG001", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
@@ -277,8 +411,33 @@ func TestHandleRegistry_PostParsesBody(t *testing.T) {
 	}
 }
 
+func TestHandleRegistry_Callback(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	received := make(chan map[string]string, 1)
+	server.OnRegistry = func(sn string, info map[string]string) {
+		received <- info
+	}
+
+	body := "DeviceType=acc"
+	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG002", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	select {
+	case info := <-received:
+		if info["DeviceType"] != "acc" {
+			t.Errorf("expected DeviceType=acc, got %s", info["DeviceType"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for OnRegistry callback")
+	}
+}
+
 func TestHandleInspect_JSON(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	server.RegisterDevice("A1")
 	// Mark old activity to test offline
 	server.devicesMutex.Lock()
@@ -295,10 +454,7 @@ func TestHandleInspect_JSON(t *testing.T) {
 		t.Errorf("expected JSON content-type, got %s", ct)
 	}
 	var payload struct {
-		Devices []struct {
-			Serial string `json:"serial"`
-			Online bool   `json:"online"`
-		} `json:"devices"`
+		Devices []DeviceSnapshot `json:"devices"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("invalid json: %v", err)
@@ -311,8 +467,33 @@ func TestHandleInspect_JSON(t *testing.T) {
 	}
 }
 
+func TestIsDeviceOnline(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	// Non-existent device
+	if server.IsDeviceOnline("GHOST") {
+		t.Error("Expected false for non-existent device")
+	}
+
+	server.RegisterDevice("ONLINE001")
+	if !server.IsDeviceOnline("ONLINE001") {
+		t.Error("Expected newly registered device to be online")
+	}
+
+	// Simulate stale activity
+	server.devicesMutex.Lock()
+	server.devices["ONLINE001"].LastActivity = time.Now().Add(-5 * time.Minute)
+	server.devicesMutex.Unlock()
+
+	if server.IsDeviceOnline("ONLINE001") {
+		t.Error("Expected device with stale activity to be offline")
+	}
+}
+
 func TestParseRegistryBody(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	body := "Key1=Val1, ~Key2=Val2,~Key3=Val3"
 	info := server.parseRegistryBody(body)
 	if info["Key1"] != "Val1" || info["Key2"] != "Val2" || info["Key3"] != "Val3" {
@@ -322,6 +503,7 @@ func TestParseRegistryBody(t *testing.T) {
 
 func TestParseAttendanceRecords(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	testCases := []struct {
 		name     string
@@ -391,6 +573,7 @@ func TestParseAttendanceRecords(t *testing.T) {
 
 func TestParseDeviceInfo(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	data := "DeviceName=ZKDevice\nSerialNumber=TEST001\nFirmwareVersion=1.0.0"
 	info := server.parseDeviceInfo(data)
@@ -408,6 +591,7 @@ func TestParseDeviceInfo(t *testing.T) {
 
 func TestSendCommand(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.SendCommand(serialNumber, "INFO")
@@ -423,6 +607,7 @@ func TestSendCommand(t *testing.T) {
 
 func TestSendDataCommand(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.SendDataCommand(serialNumber, "USER", "user data")
@@ -441,6 +626,7 @@ func TestSendDataCommand(t *testing.T) {
 
 func TestSendInfoCommand(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.SendInfoCommand(serialNumber)
@@ -475,6 +661,7 @@ func TestParseQueryParams(t *testing.T) {
 
 func TestListDevices(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 
 	server.RegisterDevice("TEST001")
 	server.RegisterDevice("TEST002")
@@ -500,6 +687,7 @@ func TestListDevices(t *testing.T) {
 
 func TestUpdateDeviceActivity(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	server.RegisterDevice(serialNumber)
@@ -521,6 +709,7 @@ func TestUpdateDeviceActivity(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
 	done := make(chan bool)
@@ -561,11 +750,12 @@ func TestConcurrentAccess(t *testing.T) {
 
 func TestAttendanceRecordSerialNumber(t *testing.T) {
 	server := NewIClockServer()
+	defer server.Close()
 	serialNumber := "TEST001"
 
-	var receivedRecord AttendanceRecord
+	received := make(chan AttendanceRecord, 1)
 	server.OnAttendance = func(record AttendanceRecord) {
-		receivedRecord = record
+		received <- record
 	}
 
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
@@ -574,13 +764,97 @@ func TestAttendanceRecordSerialNumber(t *testing.T) {
 
 	server.HandleCData(w, req)
 
-	if receivedRecord.SerialNumber != serialNumber {
-		t.Errorf("Expected SerialNumber %s, got %s", serialNumber, receivedRecord.SerialNumber)
+	select {
+	case record := <-received:
+		if record.SerialNumber != serialNumber {
+			t.Errorf("Expected SerialNumber %s, got %s", serialNumber, record.SerialNumber)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for attendance callback")
+	}
+}
+
+func TestCallbackNilAfterEnqueue(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	received := make(chan AttendanceRecord, 1)
+	server.OnAttendance = func(record AttendanceRecord) {
+		received <- record
+	}
+
+	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	// Nil the callback after the request was handled (closure already enqueued).
+	// With the captured-local fix this must not panic.
+	server.OnAttendance = nil
+
+	select {
+	case rec := <-received:
+		if rec.UserID != "123" {
+			t.Errorf("Expected UserID 123, got %s", rec.UserID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for attendance callback")
+	}
+}
+
+func TestCloseIdempotent(t *testing.T) {
+	server := NewIClockServer()
+	server.Close()
+	server.Close() // must not panic
+}
+
+func TestDispatchAfterClose(t *testing.T) {
+	server := NewIClockServer()
+	server.Close()
+
+	// Must not panic: dispatchCallback should detect the closed state.
+	server.dispatchCallback(func() {
+		t.Error("callback should not be executed after Close")
+	})
+}
+
+func TestCallbackPanicRecovery(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	received := make(chan string, 1)
+
+	// First callback panics.
+	server.OnAttendance = func(record AttendanceRecord) {
+		panic("boom")
+	}
+	req1 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+		bytes.NewBufferString("100\t2024-01-01 08:00:00\t0\t1\t0"))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	// Replace with a well-behaved callback.
+	server.OnAttendance = func(record AttendanceRecord) {
+		received <- record.UserID
+	}
+	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+		bytes.NewBufferString("200\t2024-01-01 09:00:00\t0\t1\t0"))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	select {
+	case uid := <-received:
+		if uid != "200" {
+			t.Errorf("Expected UserID 200, got %s", uid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Worker did not recover from panic; second callback never arrived")
 	}
 }
 
 func BenchmarkHandleCData(b *testing.B) {
 	server := NewIClockServer()
+	defer server.Close()
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 
 	for i := 0; i < b.N; i++ {
@@ -592,6 +866,7 @@ func BenchmarkHandleCData(b *testing.B) {
 
 func BenchmarkParseAttendanceRecords(b *testing.B) {
 	server := NewIClockServer()
+	defer server.Close()
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0\n789\t2024-01-01 12:00:00\t2\t1\t0"
 
 	for i := 0; i < b.N; i++ {
