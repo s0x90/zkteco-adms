@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -43,14 +44,10 @@ type Device struct {
 
 // copy returns a deep copy of the Device, including its Options map.
 func (d *Device) copy() *Device {
-	opts := make(map[string]string, len(d.Options))
-	for k, v := range d.Options {
-		opts[k] = v
-	}
 	return &Device{
 		SerialNumber: d.SerialNumber,
 		LastActivity: d.LastActivity,
-		Options:      opts,
+		Options:      maps.Clone(d.Options),
 	}
 }
 
@@ -270,8 +267,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		records := s.parseAttendanceRecords(string(body), serialNumber)
 		if cb := s.OnAttendance; cb != nil {
 			for _, record := range records {
-				rec := record // capture loop variable
-				s.dispatchCallback(func() { cb(rec) })
+				s.dispatchCallback(func() { cb(record) })
 			}
 		}
 
@@ -412,8 +408,7 @@ func (s *IClockServer) isDeviceOnline(device *Device) bool {
 // parseAttendanceRecords parses attendance records from the device data
 func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) []AttendanceRecord {
 	var records []AttendanceRecord
-	lines := strings.Split(strings.TrimSpace(data), "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -446,18 +441,10 @@ func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) 
 func (s *IClockServer) parseDeviceInfo(data string) map[string]string {
 	info := make(map[string]string)
 
-	lines := strings.Split(strings.TrimSpace(data), "\n")
-	for _, line := range lines {
+	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, "=") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			info[key] = value
+		if key, value, ok := strings.Cut(line, "="); ok {
+			info[strings.TrimSpace(key)] = strings.TrimSpace(value)
 		}
 	}
 
@@ -567,9 +554,7 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		info := s.parseRegistryBody(string(body))
 		s.devicesMutex.Lock()
 		if dev := s.devices[serialNumber]; dev != nil {
-			for k, v := range info {
-				dev.Options[k] = v
-			}
+			maps.Copy(dev.Options, info)
 		}
 		s.devicesMutex.Unlock()
 		if cb := s.OnRegistry; cb != nil {
@@ -618,19 +603,11 @@ func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 // parseRegistryBody parses comma-separated key=value pairs from registry POST body
 func (s *IClockServer) parseRegistryBody(data string) map[string]string {
 	info := make(map[string]string)
-	parts := strings.Split(data, ",")
-	for _, part := range parts {
+	for part := range strings.SplitSeq(data, ",") {
 		part = strings.TrimSpace(part)
-		if part == "" || !strings.Contains(part, "=") {
-			continue
+		if key, value, ok := strings.Cut(part, "="); ok {
+			info[strings.TrimPrefix(strings.TrimSpace(key), "~")] = strings.TrimSpace(value)
 		}
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		key := strings.TrimPrefix(strings.TrimSpace(kv[0]), "~")
-		value := strings.TrimSpace(kv[1])
-		info[key] = value
 	}
 	return info
 }
