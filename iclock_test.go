@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -198,7 +199,7 @@ func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
 
 	server.HandleCData(w, req)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case <-received:
 		case <-time.After(2 * time.Second):
@@ -712,28 +713,24 @@ func TestConcurrentAccess(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	done := make(chan bool)
+	var wg sync.WaitGroup
 
 	// Concurrent device registration
-	for i := 0; i < 10; i++ {
-		go func(id int) {
+	for range 10 {
+		wg.Go(func() {
 			server.RegisterDevice(serialNumber)
-			done <- true
-		}(i)
+		})
 	}
 
 	// Concurrent command queuing
-	for i := 0; i < 10; i++ {
-		go func(id int) {
+	for range 10 {
+		wg.Go(func() {
 			server.QueueCommand(serialNumber, "INFO")
-			done <- true
-		}(i)
+		})
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 20; i++ {
-		<-done
-	}
+	wg.Wait()
 
 	// Verify device exists
 	device := server.GetDevice(serialNumber)
@@ -857,7 +854,7 @@ func BenchmarkHandleCData(b *testing.B) {
 	defer server.Close()
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 		w := httptest.NewRecorder()
 		server.HandleCData(w, req)
@@ -869,7 +866,7 @@ func BenchmarkParseAttendanceRecords(b *testing.B) {
 	defer server.Close()
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0\n789\t2024-01-01 12:00:00\t2\t1\t0"
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		server.parseAttendanceRecords(data, "TEST001")
 	}
 }
