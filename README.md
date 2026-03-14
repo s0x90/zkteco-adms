@@ -1,6 +1,6 @@
 # ZK Device Sync
 
-A Go library implementing the iClock protocol for ZKTeco biometric attendance devices.
+A Go library implementing the iClock (ZKTeco ADMS) protocol for ZKTeco biometric attendance devices.
 
 ## Overview
 
