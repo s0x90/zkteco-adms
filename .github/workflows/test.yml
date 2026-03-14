@@ -31,5 +31,10 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Build examples (tagged)
+        run: |
+          go build -o /dev/null -tags basic_server ./examples/basic_server.go
+          go build -o /dev/null ./examples/database_integration.go
+
       - name: Test
-        run: go test -v -cover ./...
+        run: go test -v -race -cover ./...
