@@ -212,7 +212,7 @@ Use HTTPS
 Add an admin dashboard
 
 
-Original 
+Original:
 
-[Link-1][https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/]
-[Link-2][https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156]
+[Link-1](https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/)
+[Link-2](https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156)
