@@ -80,7 +80,9 @@ type IClockServer struct {
 	commandQueue map[string][]string // Serial number -> commands queue
 	queueMutex   sync.RWMutex
 
-	// OnAttendance is called for each batch of attendance records received.
+	// OnAttendance is called for each attendance record received.
+	// Records from a single HTTP request are dispatched as a batch internally,
+	// but this callback is invoked once per record.
 	// Set this field before passing the server to http.ListenAndServe or
 	// otherwise handling requests; it is read without synchronization from
 	// HTTP handler goroutines.
@@ -173,11 +175,21 @@ func (s *IClockServer) dispatchCallback(fn func()) bool {
 	default:
 	}
 
-	// Try to enqueue, blocking up to 1s if the channel is full.
+	// Fast-path: non-blocking send when channel has capacity.
 	select {
 	case s.callbackCh <- fn:
 		return true
-	case <-time.After(1 * time.Second):
+	default:
+	}
+
+	// Slow-path: channel is full, block up to 1s before giving up.
+	timer := time.NewTimer(1 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case s.callbackCh <- fn:
+		return true
+	case <-timer.C:
 		s.logger.Printf("[Callback] WARNING: callback queue full after 1s timeout, dropping event")
 		return false
 	case <-s.closeCh:
@@ -289,7 +301,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			batch := records // capture for closure
 			ok := s.dispatchCallback(func() {
 				for _, record := range batch {
-					cb(record)
+					s.safeCall(func() { cb(record) })
 				}
 			})
 			if !ok {
@@ -438,7 +450,6 @@ func (s *IClockServer) isDeviceOnline(device *Device) bool {
 	return time.Since(device.LastActivity) <= 2*time.Minute
 }
 
-// parseAttendanceRecords parses attendance records from the device data
 // parseAttendanceRecords parses attendance records from the device ATTLOG data.
 // Each line must have at least a UserID and a parseable timestamp (either
 // "2006-01-02 15:04:05" format or a Unix epoch integer). Malformed lines are

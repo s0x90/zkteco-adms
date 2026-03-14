@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1060,8 +1061,14 @@ func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
 			draining = false
 		}
 	}
-	// Give the worker a moment to finish processing its current item and become idle.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the worker to finish processing and the queue to be fully empty.
+	deadline := time.Now().Add(3 * time.Second)
+	for len(server.callbackCh) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("Timed out waiting for callback queue to drain")
+		}
+		runtime.Gosched()
+	}
 
 	// Second attempt: queue has space, should succeed.
 	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
