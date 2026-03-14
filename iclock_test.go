@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -557,6 +558,61 @@ func TestParseAttendanceRecords(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:     "too few fields rejected",
+			data:     "only-one-field",
+			expected: 0,
+			checkFn:  nil,
+		},
+		{
+			name:     "invalid timestamp rejected",
+			data:     "100\tnot-a-date\t0\t1\t0",
+			expected: 0,
+			checkFn:  nil,
+		},
+		{
+			name:     "empty userid rejected",
+			data:     "100\t2024-01-01 08:00:00\t0\t1\t0\n\t2024-01-01 09:00:00\t0\t1\t0",
+			expected: 1,
+			checkFn: func(t *testing.T, records []AttendanceRecord) {
+				if records[0].UserID != "100" {
+					t.Errorf("Expected UserID 100, got %s", records[0].UserID)
+				}
+			},
+		},
+		{
+			name:     "mixed valid and invalid lines",
+			data:     "100\t2024-01-01 08:00:00\t0\t1\t0\njunk\n200\tbad-ts\t0\n300\t2024-01-01 09:00:00\t0\t1\t0",
+			expected: 2,
+			checkFn: func(t *testing.T, records []AttendanceRecord) {
+				if records[0].UserID != "100" {
+					t.Errorf("First record: expected UserID 100, got %s", records[0].UserID)
+				}
+				if records[1].UserID != "300" {
+					t.Errorf("Second record: expected UserID 300, got %s", records[1].UserID)
+				}
+			},
+		},
+		{
+			name:     "non-integer status defaults to zero",
+			data:     "100\t2024-01-01 08:00:00\tabc\t1\t0",
+			expected: 1,
+			checkFn: func(t *testing.T, records []AttendanceRecord) {
+				if records[0].Status != 0 {
+					t.Errorf("Expected Status 0 for non-integer input, got %d", records[0].Status)
+				}
+			},
+		},
+		{
+			name:     "non-integer verifymode defaults to zero",
+			data:     "100\t2024-01-01 08:00:00\t0\txyz\t0",
+			expected: 1,
+			checkFn: func(t *testing.T, records []AttendanceRecord) {
+				if records[0].VerifyMode != 0 {
+					t.Errorf("Expected VerifyMode 0 for non-integer input, got %d", records[0].VerifyMode)
+				}
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -809,10 +865,13 @@ func TestDispatchAfterClose(t *testing.T) {
 	server := NewIClockServer()
 	server.Close()
 
-	// Must not panic: dispatchCallback should detect the closed state.
-	server.dispatchCallback(func() {
+	// Must not panic: dispatchCallback should detect the closed state and return false.
+	ok := server.dispatchCallback(func() {
 		t.Error("callback should not be executed after Close")
 	})
+	if ok {
+		t.Error("Expected dispatchCallback to return false after Close")
+	}
 }
 
 func TestCallbackPanicRecovery(t *testing.T) {
@@ -868,5 +927,248 @@ func BenchmarkParseAttendanceRecords(b *testing.B) {
 
 	for b.Loop() {
 		server.parseAttendanceRecords(data, "TEST001")
+	}
+}
+
+func TestHandleCData_BatchDispatch(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	var mu sync.Mutex
+	var received []AttendanceRecord
+	done := make(chan struct{})
+
+	server.OnAttendance = func(record AttendanceRecord) {
+		mu.Lock()
+		received = append(received, record)
+		if len(received) == 3 {
+			close(done)
+		}
+		mu.Unlock()
+	}
+
+	// Send 3 records in a single POST — they should arrive via a single batch dispatch.
+	data := "100\t2024-01-01 08:00:00\t0\t1\t0\n200\t2024-01-01 09:00:00\t1\t1\t0\n300\t2024-01-01 10:00:00\t0\t2\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=BATCH001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "OK: 3") {
+		t.Errorf("Expected 'OK: 3', got %s", w.Body.String())
+	}
+
+	select {
+	case <-done:
+		mu.Lock()
+		defer mu.Unlock()
+		if len(received) != 3 {
+			t.Fatalf("Expected 3 records, got %d", len(received))
+		}
+		if received[0].UserID != "100" || received[1].UserID != "200" || received[2].UserID != "300" {
+			t.Errorf("Records arrived in wrong order: %v", received)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timed out waiting for batched attendance records")
+	}
+}
+
+func TestHandleCData_QueueFull_Returns503(t *testing.T) {
+	server := NewIClockServer()
+	defer server.Close()
+
+	// Block the worker with a long-running callback so it can't drain the queue.
+	workerBlocked := make(chan struct{})
+	workerRelease := make(chan struct{})
+	server.callbackCh <- func() {
+		close(workerBlocked)
+		<-workerRelease
+	}
+
+	// Wait until the worker is actually blocked.
+	<-workerBlocked
+
+	// Now fill the remaining channel capacity. Worker is stuck, so nothing drains.
+	for range cap(server.callbackCh) {
+		server.callbackCh <- func() {}
+	}
+
+	server.OnAttendance = func(record AttendanceRecord) {}
+
+	// Queue is full and worker is blocked — dispatch should fail after ~1s.
+	data := "999\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=FULL001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("Expected 503, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "FAIL") {
+		t.Errorf("Expected FAIL in response body, got: %s", w.Body.String())
+	}
+
+	// Unblock the worker so Close() can drain.
+	close(workerRelease)
+}
+
+func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
+	server := NewIClockServer()
+
+	received := make(chan AttendanceRecord, 1)
+	server.OnAttendance = func(record AttendanceRecord) {
+		received <- record
+	}
+
+	// Block the worker so it can't drain the queue.
+	workerBlocked := make(chan struct{})
+	workerRelease := make(chan struct{})
+	server.callbackCh <- func() {
+		close(workerBlocked)
+		<-workerRelease
+	}
+	<-workerBlocked
+
+	// Fill the remaining channel capacity with no-ops. Worker is stuck.
+	for range cap(server.callbackCh) {
+		server.callbackCh <- func() {}
+	}
+
+	// First attempt: queue is full, should get 503.
+	data := "888\t2024-01-01 08:00:00\t0\t1\t0"
+	req1 := httptest.NewRequest("POST", "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	if w1.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 on first attempt, got %d", w1.Code)
+	}
+
+	// Release the worker and drain the channel to simulate queue recovery.
+	close(workerRelease)
+
+	// Drain remaining no-ops non-blocking to avoid racing with the worker.
+	draining := true
+	for draining {
+		select {
+		case <-server.callbackCh:
+		default:
+			draining = false
+		}
+	}
+	// Give the worker a moment to finish processing its current item and become idle.
+	time.Sleep(100 * time.Millisecond)
+
+	// Second attempt: queue has space, should succeed.
+	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("Expected 200 on retry, got %d", w2.Code)
+	}
+	if !strings.Contains(w2.Body.String(), "OK: 1") {
+		t.Errorf("Expected 'OK: 1', got %s", w2.Body.String())
+	}
+
+	select {
+	case rec := <-received:
+		if rec.UserID != "888" {
+			t.Errorf("Expected UserID 888, got %s", rec.UserID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timed out waiting for retried attendance callback")
+	}
+
+	server.Close()
+}
+
+func TestDispatchCallback_ReturnsFalseAfterClose(t *testing.T) {
+	server := NewIClockServer()
+	server.Close()
+
+	executed := false
+	ok := server.dispatchCallback(func() {
+		executed = true
+	})
+
+	if ok {
+		t.Error("Expected dispatchCallback to return false after Close")
+	}
+	if executed {
+		t.Error("Callback should not have been executed after Close")
+	}
+}
+
+func TestClose_DrainsAllAcceptedCallbacks(t *testing.T) {
+	server := NewIClockServer()
+
+	// Block the worker so callbacks pile up in the channel.
+	workerBlocked := make(chan struct{})
+	workerRelease := make(chan struct{})
+	server.callbackCh <- func() {
+		close(workerBlocked)
+		<-workerRelease
+	}
+	<-workerBlocked
+
+	// Dispatch several callbacks while the worker is blocked.
+	const n = 50
+	var count atomic.Int64
+	for range n {
+		ok := server.dispatchCallback(func() {
+			count.Add(1)
+		})
+		if !ok {
+			t.Fatal("dispatchCallback should succeed while server is open")
+		}
+	}
+
+	// Release the worker and close the server. Close must block until
+	// all 50 accepted callbacks have been executed.
+	close(workerRelease)
+	server.Close()
+
+	if got := count.Load(); got != n {
+		t.Errorf("Expected all %d callbacks to run before Close returned, got %d", n, got)
+	}
+}
+
+func TestClose_ConcurrentDispatchAndClose(t *testing.T) {
+	server := NewIClockServer()
+
+	var accepted atomic.Int64
+	var executed atomic.Int64
+	var wg sync.WaitGroup
+
+	// Spawn goroutines that continuously dispatch callbacks.
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				ok := server.dispatchCallback(func() {
+					executed.Add(1)
+				})
+				if !ok {
+					return // server closed or queue full
+				}
+				accepted.Add(1)
+			}
+		}()
+	}
+
+	// Let dispatchers run briefly, then close.
+	time.Sleep(10 * time.Millisecond)
+	server.Close()
+	wg.Wait()
+
+	// Every accepted callback must have been executed.
+	if a, e := accepted.Load(), executed.Load(); a != e {
+		t.Errorf("accepted=%d but executed=%d; Close did not drain all accepted callbacks", a, e)
 	}
 }

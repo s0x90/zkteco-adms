@@ -79,19 +79,34 @@ type IClockServer struct {
 	devicesMutex sync.RWMutex
 	commandQueue map[string][]string // Serial number -> commands queue
 	queueMutex   sync.RWMutex
+
+	// OnAttendance is called for each batch of attendance records received.
+	// Set this field before passing the server to http.ListenAndServe or
+	// otherwise handling requests; it is read without synchronization from
+	// HTTP handler goroutines.
 	OnAttendance func(record AttendanceRecord)
+
+	// OnDeviceInfo is called when a device posts its info parameters.
+	// Set this field before serving; it is read without synchronization.
 	OnDeviceInfo func(sn string, info map[string]string)
-	OnRegistry   func(sn string, info map[string]string)
-	logger       *log.Logger
+
+	// OnRegistry is called when a device registers or re-registers.
+	// Set this field before serving; it is read without synchronization.
+	OnRegistry func(sn string, info map[string]string)
+
+	logger *log.Logger
 
 	callbackCh   chan func()
+	callbackMu   sync.RWMutex // guards callbackCh close in coordination with dispatchers
 	callbackDone chan struct{}
 	closeCh      chan struct{}
 	closeOnce    sync.Once
 }
 
 // NewIClockServer creates a new iclock server instance.
-// Call Close when the server is no longer needed.
+// Set callback fields (OnAttendance, OnDeviceInfo, OnRegistry) before
+// passing the server to http.ListenAndServe. Call Close when the server
+// is no longer needed to drain pending callbacks and stop the worker.
 func NewIClockServer() *IClockServer {
 	s := &IClockServer{
 		devices:      make(map[string]*Device),
@@ -110,30 +125,26 @@ func NewIClockServer() *IClockServer {
 // Close is safe to call multiple times.
 func (s *IClockServer) Close() {
 	s.closeOnce.Do(func() {
+		// Signal all dispatchers to stop accepting new callbacks.
 		close(s.closeCh)
+		// Wait for any in-flight dispatchCallback calls to finish sending.
+		// RLock holders (dispatchers) will see closeCh and exit their select.
+		s.callbackMu.Lock()
+		// Now safe: no dispatcher can be mid-send on callbackCh.
+		close(s.callbackCh)
+		s.callbackMu.Unlock()
+		// Wait for the worker to drain all remaining callbacks and exit.
 		<-s.callbackDone
 	})
 }
 
 // callbackWorker processes queued callbacks sequentially.
+// It exits when callbackCh is closed and fully drained.
 // Panics in user callbacks are recovered so the worker stays alive.
 func (s *IClockServer) callbackWorker() {
 	defer close(s.callbackDone)
-	for {
-		select {
-		case fn := <-s.callbackCh:
-			s.safeCall(fn)
-		case <-s.closeCh:
-			// Drain remaining callbacks before exiting.
-			for {
-				select {
-				case fn := <-s.callbackCh:
-					s.safeCall(fn)
-				default:
-					return
-				}
-			}
-		}
+	for fn := range s.callbackCh {
+		s.safeCall(fn)
 	}
 }
 
@@ -148,20 +159,29 @@ func (s *IClockServer) safeCall(fn func()) {
 }
 
 // dispatchCallback enqueues a callback for asynchronous execution.
-// If the callback channel is full or the server is closed, the event is dropped.
-func (s *IClockServer) dispatchCallback(fn func()) {
-	// Fast-path: if the server is already closing/closed, drop the callback.
+// It blocks for up to 1 second if the channel is full before giving up.
+// Returns true if the callback was enqueued, false if the server is closed
+// or the timeout expired.
+func (s *IClockServer) dispatchCallback(fn func()) bool {
+	s.callbackMu.RLock()
+	defer s.callbackMu.RUnlock()
+
+	// Fast-path: if the server is already closing/closed, reject the callback.
 	select {
 	case <-s.closeCh:
-		return
+		return false
 	default:
 	}
 
-	// Server is not closed at this point; try to enqueue without blocking.
+	// Try to enqueue, blocking up to 1s if the channel is full.
 	select {
 	case s.callbackCh <- fn:
-	default:
-		s.logger.Printf("[Callback] WARNING: callback queue full, dropping event")
+		return true
+	case <-time.After(1 * time.Second):
+		s.logger.Printf("[Callback] WARNING: callback queue full after 1s timeout, dropping event")
+		return false
+	case <-s.closeCh:
+		return false
 	}
 }
 
@@ -265,9 +285,20 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		records := s.parseAttendanceRecords(string(body), serialNumber)
-		if cb := s.OnAttendance; cb != nil {
-			for _, record := range records {
-				s.dispatchCallback(func() { cb(record) })
+		if cb := s.OnAttendance; cb != nil && len(records) > 0 {
+			batch := records // capture for closure
+			ok := s.dispatchCallback(func() {
+				for _, record := range batch {
+					cb(record)
+				}
+			})
+			if !ok {
+				s.logger.Printf("[iClock Protocol] FAIL: callback queue full, %d records from device %s not processed",
+					len(records), serialNumber)
+				http.Error(w,
+					fmt.Sprintf("FAIL: callback queue full, %d records not processed", len(records)),
+					http.StatusServiceUnavailable)
+				return
 			}
 		}
 
@@ -290,7 +321,9 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			if cb := s.OnDeviceInfo; len(body) > 0 && cb != nil {
 				info := s.parseDeviceInfo(string(body))
 				sn := serialNumber
-				s.dispatchCallback(func() { cb(sn, info) })
+				if !s.dispatchCallback(func() { cb(sn, info) }) {
+					s.logger.Printf("[iClock Protocol] WARNING: callback queue full, device info from %s dropped", serialNumber)
+				}
 			}
 			if len(body) > 0 {
 				preview := string(body)
@@ -406,33 +439,75 @@ func (s *IClockServer) isDeviceOnline(device *Device) bool {
 }
 
 // parseAttendanceRecords parses attendance records from the device data
+// parseAttendanceRecords parses attendance records from the device ATTLOG data.
+// Each line must have at least a UserID and a parseable timestamp (either
+// "2006-01-02 15:04:05" format or a Unix epoch integer). Malformed lines are
+// skipped and logged so downstream systems never receive zero-value timestamps.
 func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) []AttendanceRecord {
 	var records []AttendanceRecord
+	var skipped int
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimRight(line, "\r") // handle \r\n line endings
 		if line == "" {
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		if len(parts) >= 2 {
-			record := AttendanceRecord{SerialNumber: serialNumber}
-			record.UserID = parts[0]
-			if timestamp, err := time.Parse("2006-01-02 15:04:05", parts[1]); err == nil {
-				record.Timestamp = timestamp
-			} else if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-				record.Timestamp = time.Unix(ts, 0)
-			}
-			if len(parts) >= 3 {
-				record.Status, _ = strconv.Atoi(parts[2])
-			}
-			if len(parts) >= 4 {
-				record.VerifyMode, _ = strconv.Atoi(parts[3])
-			}
-			if len(parts) >= 5 {
-				record.WorkCode = parts[4]
-			}
-			records = append(records, record)
+		if len(parts) < 2 {
+			skipped++
+			s.logger.Printf("[Parse] device %s: skipping malformed ATTLOG line (need >=2 fields, got %d): %q",
+				serialNumber, len(parts), line)
+			continue
 		}
+
+		userID := strings.TrimSpace(parts[0])
+		if userID == "" {
+			skipped++
+			s.logger.Printf("[Parse] device %s: skipping ATTLOG line with empty UserID: %q",
+				serialNumber, line)
+			continue
+		}
+
+		var ts time.Time
+		if parsed, err := time.Parse("2006-01-02 15:04:05", parts[1]); err == nil {
+			ts = parsed
+		} else if epoch, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+			ts = time.Unix(epoch, 0)
+		} else {
+			skipped++
+			s.logger.Printf("[Parse] device %s: skipping ATTLOG line with unparseable timestamp %q: %q",
+				serialNumber, parts[1], line)
+			continue
+		}
+
+		record := AttendanceRecord{
+			SerialNumber: serialNumber,
+			UserID:       userID,
+			Timestamp:    ts,
+		}
+		if len(parts) >= 3 {
+			if v, err := strconv.Atoi(parts[2]); err == nil {
+				record.Status = v
+			} else {
+				s.logger.Printf("[Parse] device %s: non-integer Status field %q, defaulting to 0",
+					serialNumber, parts[2])
+			}
+		}
+		if len(parts) >= 4 {
+			if v, err := strconv.Atoi(parts[3]); err == nil {
+				record.VerifyMode = v
+			} else {
+				s.logger.Printf("[Parse] device %s: non-integer VerifyMode field %q, defaulting to 0",
+					serialNumber, parts[3])
+			}
+		}
+		if len(parts) >= 5 {
+			record.WorkCode = parts[4]
+		}
+		records = append(records, record)
+	}
+	if skipped > 0 {
+		s.logger.Printf("[Parse] device %s: skipped %d malformed ATTLOG line(s) out of %d total",
+			serialNumber, skipped, len(records)+skipped)
 	}
 	return records
 }
@@ -559,7 +634,9 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		s.devicesMutex.Unlock()
 		if cb := s.OnRegistry; cb != nil {
 			sn := serialNumber
-			s.dispatchCallback(func() { cb(sn, info) })
+			if !s.dispatchCallback(func() { cb(sn, info) }) {
+				s.logger.Printf("[iClock Protocol] WARNING: callback queue full, registry info from %s dropped", serialNumber)
+			}
 		}
 	}
 	w.WriteHeader(http.StatusOK)
