@@ -66,17 +66,25 @@ ZKTeco ADMS exchange (simplified, but accurate)
 
 HTTP Request (from device → server)
 
+```
 POST /iclock/cdata?SN=AC123456789&table=options&c=registry HTTP/1.1
 Host: yourserver.com
 Content-Type: application/x-www-form-urlencoded
 Content-Length: 0
+```
+
 Server Response
 
+```
 OK
+
+```
+
 This tells the device “you’re registered, continue sending data.”
 
 2. Sending Attendance Logs
 
+```
 HTTP Request
 
 POST /iclock/cdata?SN=AC123456789&table=ATTLOG&c=log HTTP/1.1
@@ -90,12 +98,16 @@ PIN = user ID
 DateTime = timestamp of check-in/out
 Verified = verification mode (1=fingerprint, 15=face, etc.)
 Status = check type (0=check-in, 1=check-out, etc.)
+```
 
 Server Response
 
+```
 OK
+```
 3. Sending User Data
 
+```
 HTTP Request
 
 POST /iclock/cdata?SN=AC123456789&table=USER&c=data HTTP/1.1
@@ -106,35 +118,45 @@ PIN=1001    Name=John Doe    Privilege=0    Card=12345678
 PIN=1002    Name=Alice Smith Privilege=14   Card=87654321
 Privilege=0 → Normal user
 Privilege=14 → Admin
+```
 
 Server Response
 
+```
 OK
+```
+
 4. Server Commands → Device
 
 Sometimes the device polls for commands.
 
 Device Poll
 
+```
 GET /iclock/getrequest?SN=AC123456789 HTTP/1.1
 Host: yourserver.com
 Server Response
 
 USER ADD PIN=1003    Name=Bob Marley    Privilege=0    Card=99887766
 USER DEL PIN=1002
+```
+
 The device will execute these and then respond "OK".
 
 5. Photo / Face Templates (optional)
 
 Some devices also send photos or templates with:
 
+```
 POST /iclock/cdata?SN=AC123456789&table=PHOTO&c=upload
+```
 (binary data in body)
 
 As you can see, it’s just HTTP + plain text with key=value pairs, very different from REST/JSON APIs. The whole flow is lightweight and easy to parse, which is why ZKTeco can support it even on low-power terminals.
 
 Code exemple with Python/Flask
 
+```
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -173,6 +195,8 @@ def getrequest():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
+```
+
 What this server does
 
 Accepts logs (ATTLOG)
