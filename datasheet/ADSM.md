@@ -4,9 +4,9 @@ ADMS = Automatic Data Master Server (sometimes also referred to as Attendance De
 
 The protocol is at the heart of ZKTeco’s cloud-based attendance management. Devices don’t just store logs locally — they push logs, user data, and status updates to an ADMS server over HTTP(S).
 
-How it Works
+## How it Works
 
-1.Device Initialization
+1. Device Initialization
 
 Each device is configured with:
 
@@ -54,7 +54,7 @@ Lightweight: Uses very simple HTTP/text instead of complex APIs.
 Stateless: Each request is standalone, relies on SN + key for identification.
 Compatible: Works across many ZKTeco device families (iClock, ZKTime, SilkBio, etc.).
 
-Limitations
+## Limitations
 
 Proprietary: Not officially published in full detail (info comes from reverse-engineering and community docs).
 Security: Plain HTTP by default; encryption is weak unless forced over HTTPS.
@@ -210,3 +210,9 @@ Save logs/users in a database
 Implement authentication (commKey)
 Use HTTPS
 Add an admin dashboard
+
+
+Original 
+
+[Link-1][https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/]
+[Link-2][https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156]
