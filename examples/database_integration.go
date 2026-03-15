@@ -95,8 +95,8 @@ func main() {
 	// Initialize the attendance store
 	store := NewAttendanceStore()
 
-	// Create the iclock server
-	server := zkdevicesync.NewIClockServer()
+	// Create the ADMS server
+	server := zkdevicesync.NewADMSServer()
 	defer server.Close()
 
 	// Set up attendance callback to save to database

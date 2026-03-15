@@ -14,10 +14,10 @@ import (
 )
 
 func TestNewIClockServer(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	if server == nil {
-		t.Fatal("NewIClockServer returned nil")
+		t.Fatal("NewADMSServer returned nil")
 	}
 	if server.devices == nil {
 		t.Error("devices map not initialized")
@@ -28,7 +28,7 @@ func TestNewIClockServer(t *testing.T) {
 }
 
 func TestRegisterDevice(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -47,7 +47,7 @@ func TestRegisterDevice(t *testing.T) {
 }
 
 func TestGetDeviceReturnsCopy(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	server.RegisterDevice("COPY001")
@@ -66,7 +66,7 @@ func TestGetDeviceReturnsCopy(t *testing.T) {
 }
 
 func TestListDevicesReturnsCopies(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	server.RegisterDevice("LD001")
@@ -88,7 +88,7 @@ func TestListDevicesReturnsCopies(t *testing.T) {
 }
 
 func TestQueueAndGetCommands(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -114,7 +114,7 @@ func TestQueueAndGetCommands(t *testing.T) {
 }
 
 func TestGetCommandsDeletesKey(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	server.QueueCommand("DEL001", "INFO")
@@ -130,7 +130,7 @@ func TestGetCommandsDeletesKey(t *testing.T) {
 }
 
 func TestHandleCData_MissingSN(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	req := httptest.NewRequest("GET", "/iclock/cdata", nil)
@@ -147,7 +147,7 @@ func TestHandleCData_MissingSN(t *testing.T) {
 }
 
 func TestHandleCData_AttendanceLog(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	received := make(chan AttendanceRecord, 1)
@@ -186,7 +186,7 @@ func TestHandleCData_AttendanceLog(t *testing.T) {
 }
 
 func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	received := make(chan AttendanceRecord, 2)
@@ -211,7 +211,7 @@ func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
 }
 
 func TestHandleCData_OperationLog(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=OPERLOG", bytes.NewBufferString("operation data"))
@@ -228,7 +228,7 @@ func TestHandleCData_OperationLog(t *testing.T) {
 }
 
 func TestHandleCData_WithPendingCommands(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -248,7 +248,7 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 }
 
 func TestHandleGetRequest(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -268,7 +268,7 @@ func TestHandleGetRequest(t *testing.T) {
 }
 
 func TestHandleGetRequest_NoCommands(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	req := httptest.NewRequest("GET", "/iclock/getrequest?SN=TEST001", nil)
@@ -285,7 +285,7 @@ func TestHandleGetRequest_NoCommands(t *testing.T) {
 }
 
 func TestHandleDeviceCmd(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	req := httptest.NewRequest("POST", "/iclock/devicecmd?SN=TEST001", bytes.NewBufferString("command result"))
@@ -302,7 +302,7 @@ func TestHandleDeviceCmd(t *testing.T) {
 }
 
 func TestHandleDeviceCmd_RegistersDevice(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	// Device was never registered — HandleDeviceCmd should register it.
@@ -324,7 +324,7 @@ func TestHandleDeviceCmd_RegistersDevice(t *testing.T) {
 }
 
 func TestServeHTTP(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	testCases := []struct {
@@ -358,7 +358,7 @@ func TestServeHTTP(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	testCases := []struct {
@@ -390,7 +390,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleRegistry_PostParsesBody(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	body := "DeviceType=acc,~DeviceName=SpeedFace,IPAddress=192.168.1.201"
 	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG001", bytes.NewBufferString(body))
@@ -415,7 +415,7 @@ func TestHandleRegistry_PostParsesBody(t *testing.T) {
 }
 
 func TestHandleRegistry_Callback(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	received := make(chan map[string]string, 1)
@@ -439,7 +439,7 @@ func TestHandleRegistry_Callback(t *testing.T) {
 }
 
 func TestHandleInspect_JSON(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	server.RegisterDevice("A1")
 	// Mark old activity to test offline
@@ -471,7 +471,7 @@ func TestHandleInspect_JSON(t *testing.T) {
 }
 
 func TestIsDeviceOnline(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	// Non-existent device
@@ -495,7 +495,7 @@ func TestIsDeviceOnline(t *testing.T) {
 }
 
 func TestParseRegistryBody(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	body := "Key1=Val1, ~Key2=Val2,~Key3=Val3"
 	info := server.parseRegistryBody(body)
@@ -505,7 +505,7 @@ func TestParseRegistryBody(t *testing.T) {
 }
 
 func TestParseAttendanceRecords(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	testCases := []struct {
@@ -630,7 +630,7 @@ func TestParseAttendanceRecords(t *testing.T) {
 }
 
 func TestParseDeviceInfo(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	data := "DeviceName=ZKDevice\nSerialNumber=TEST001\nFirmwareVersion=1.0.0"
@@ -648,7 +648,7 @@ func TestParseDeviceInfo(t *testing.T) {
 }
 
 func TestSendCommand(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -664,7 +664,7 @@ func TestSendCommand(t *testing.T) {
 }
 
 func TestSendDataCommand(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -683,7 +683,7 @@ func TestSendDataCommand(t *testing.T) {
 }
 
 func TestSendInfoCommand(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -718,7 +718,7 @@ func TestParseQueryParams(t *testing.T) {
 }
 
 func TestListDevices(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	server.RegisterDevice("TEST001")
@@ -744,7 +744,7 @@ func TestListDevices(t *testing.T) {
 }
 
 func TestUpdateDeviceActivity(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -766,7 +766,7 @@ func TestUpdateDeviceActivity(t *testing.T) {
 }
 
 func TestConcurrentAccess(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -803,7 +803,7 @@ func TestConcurrentAccess(t *testing.T) {
 }
 
 func TestAttendanceRecordSerialNumber(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
@@ -829,7 +829,7 @@ func TestAttendanceRecordSerialNumber(t *testing.T) {
 }
 
 func TestCallbackNilAfterEnqueue(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	received := make(chan AttendanceRecord, 1)
@@ -857,13 +857,13 @@ func TestCallbackNilAfterEnqueue(t *testing.T) {
 }
 
 func TestCloseIdempotent(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	server.Close()
 	server.Close() // must not panic
 }
 
 func TestDispatchAfterClose(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	server.Close()
 
 	// Must not panic: dispatchCallback should detect the closed state and return false.
@@ -876,7 +876,7 @@ func TestDispatchAfterClose(t *testing.T) {
 }
 
 func TestCallbackPanicRecovery(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	received := make(chan string, 1)
@@ -910,7 +910,7 @@ func TestCallbackPanicRecovery(t *testing.T) {
 }
 
 func BenchmarkHandleCData(b *testing.B) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 
@@ -922,7 +922,7 @@ func BenchmarkHandleCData(b *testing.B) {
 }
 
 func BenchmarkParseAttendanceRecords(b *testing.B) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0\n789\t2024-01-01 12:00:00\t2\t1\t0"
 
@@ -932,7 +932,7 @@ func BenchmarkParseAttendanceRecords(b *testing.B) {
 }
 
 func TestHandleCData_BatchDispatch(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	var mu sync.Mutex
@@ -978,7 +978,7 @@ func TestHandleCData_BatchDispatch(t *testing.T) {
 }
 
 func TestHandleCData_QueueFull_Returns503(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	defer server.Close()
 
 	// Block the worker with a long-running callback so it can't drain the queue.
@@ -1018,7 +1018,7 @@ func TestHandleCData_QueueFull_Returns503(t *testing.T) {
 }
 
 func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 
 	received := make(chan AttendanceRecord, 1)
 	server.OnAttendance = func(record AttendanceRecord) {
@@ -1095,7 +1095,7 @@ func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
 }
 
 func TestDispatchCallback_ReturnsFalseAfterClose(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 	server.Close()
 
 	executed := false
@@ -1112,7 +1112,7 @@ func TestDispatchCallback_ReturnsFalseAfterClose(t *testing.T) {
 }
 
 func TestClose_DrainsAllAcceptedCallbacks(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 
 	// Block the worker so callbacks pile up in the channel.
 	workerBlocked := make(chan struct{})
@@ -1146,7 +1146,7 @@ func TestClose_DrainsAllAcceptedCallbacks(t *testing.T) {
 }
 
 func TestClose_ConcurrentDispatchAndClose(t *testing.T) {
-	server := NewIClockServer()
+	server := NewADMSServer()
 
 	var accepted atomic.Int64
 	var executed atomic.Int64

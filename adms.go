@@ -1,12 +1,12 @@
-// Package zkdevicesync provides an implementation of the iClock protocol
+// Package zkdevicesync provides an implementation of the ADMS protocol
 // for ZKTeco biometric attendance devices.
 //
-// The iClock protocol is an HTTP-based protocol used by ZKTeco devices to
+// The ADMS protocol is an HTTP-based protocol used by ZKTeco devices to
 // communicate with servers for sending attendance data and receiving commands.
 //
 // Basic usage:
 //
-//	server := zkdevicesync.NewIClockServer()
+//	server := zkdevicesync.NewADMSServer()
 //	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
 //	    fmt.Printf("User %s at %s\n", record.UserID, record.Timestamp)
 //	}
@@ -69,12 +69,12 @@ type DeviceSnapshot struct {
 	Options      map[string]string `json:"options"`
 }
 
-// IClockServer manages communication with ZKTeco devices using the iclock protocol.
+// ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
 //
 // Callbacks (OnAttendance, OnDeviceInfo, OnRegistry) are dispatched asynchronously
 // via an internal worker goroutine so they never block device HTTP responses.
 // Call Close to drain the callback queue when the server is shutting down.
-type IClockServer struct {
+type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
 	commandQueue map[string][]string // Serial number -> commands queue
@@ -105,12 +105,12 @@ type IClockServer struct {
 	closeOnce    sync.Once
 }
 
-// NewIClockServer creates a new iclock server instance.
+// NewADMSServer creates a new  server instance.
 // Set callback fields (OnAttendance, OnDeviceInfo, OnRegistry) before
 // passing the server to http.ListenAndServe. Call Close when the server
 // is no longer needed to drain pending callbacks and stop the worker.
-func NewIClockServer() *IClockServer {
-	s := &IClockServer{
+func NewADMSServer() *ADMSServer {
+	s := &ADMSServer{
 		devices:      make(map[string]*Device),
 		commandQueue: make(map[string][]string),
 		logger:       log.Default(),
@@ -125,7 +125,7 @@ func NewIClockServer() *IClockServer {
 // Close drains the callback queue and stops the worker goroutine.
 // It blocks until all pending callbacks have been executed.
 // Close is safe to call multiple times.
-func (s *IClockServer) Close() {
+func (s *ADMSServer) Close() {
 	s.closeOnce.Do(func() {
 		// Signal all dispatchers to stop accepting new callbacks.
 		close(s.closeCh)
@@ -143,7 +143,7 @@ func (s *IClockServer) Close() {
 // callbackWorker processes queued callbacks sequentially.
 // It exits when callbackCh is closed and fully drained.
 // Panics in user callbacks are recovered so the worker stays alive.
-func (s *IClockServer) callbackWorker() {
+func (s *ADMSServer) callbackWorker() {
 	defer close(s.callbackDone)
 	for fn := range s.callbackCh {
 		s.safeCall(fn)
@@ -151,7 +151,7 @@ func (s *IClockServer) callbackWorker() {
 }
 
 // safeCall executes fn, recovering from any panic.
-func (s *IClockServer) safeCall(fn func()) {
+func (s *ADMSServer) safeCall(fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Printf("[Callback] panic recovered: %v", r)
@@ -164,7 +164,7 @@ func (s *IClockServer) safeCall(fn func()) {
 // It blocks for up to 1 second if the channel is full before giving up.
 // Returns true if the callback was enqueued, false if the server is closed
 // or the timeout expired.
-func (s *IClockServer) dispatchCallback(fn func()) bool {
+func (s *ADMSServer) dispatchCallback(fn func()) bool {
 	s.callbackMu.RLock()
 	defer s.callbackMu.RUnlock()
 
@@ -198,7 +198,7 @@ func (s *IClockServer) dispatchCallback(fn func()) bool {
 }
 
 // RegisterDevice registers a new device
-func (s *IClockServer) RegisterDevice(serialNumber string) {
+func (s *ADMSServer) RegisterDevice(serialNumber string) {
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
 
@@ -213,7 +213,7 @@ func (s *IClockServer) RegisterDevice(serialNumber string) {
 
 // GetDevice retrieves a copy of device information.
 // Returns nil if the device is not registered.
-func (s *IClockServer) GetDevice(serialNumber string) *Device {
+func (s *ADMSServer) GetDevice(serialNumber string) *Device {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
 	d := s.devices[serialNumber]
@@ -224,7 +224,7 @@ func (s *IClockServer) GetDevice(serialNumber string) *Device {
 }
 
 // IsDeviceOnline reports whether the device has been active within the last 2 minutes.
-func (s *IClockServer) IsDeviceOnline(serialNumber string) bool {
+func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
 	d := s.devices[serialNumber]
@@ -232,7 +232,7 @@ func (s *IClockServer) IsDeviceOnline(serialNumber string) bool {
 }
 
 // QueueCommand adds a command to be sent to the device
-func (s *IClockServer) QueueCommand(serialNumber, command string) {
+func (s *ADMSServer) QueueCommand(serialNumber, command string) {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
@@ -240,7 +240,7 @@ func (s *IClockServer) QueueCommand(serialNumber, command string) {
 }
 
 // GetCommands retrieves pending commands for a device
-func (s *IClockServer) GetCommands(serialNumber string) []string {
+func (s *ADMSServer) GetCommands(serialNumber string) []string {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
@@ -250,7 +250,7 @@ func (s *IClockServer) GetCommands(serialNumber string) []string {
 }
 
 // HandleCData handles the /iclock/cdata endpoint for attendance data
-func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -268,10 +268,10 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	s.updateDeviceActivity(serialNumber)
 
 	// Logging basic request info
-	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag", "table"} {
 		if v := query.Get(k); v != "" {
-			s.logger.Printf("[iClock Protocol]   %s: %s", k, v)
+			s.logger.Printf("[ADMS Protocol]   %s: %s", k, v)
 		}
 	}
 
@@ -293,7 +293,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			if len(preview) > 200 {
 				preview = preview[:200] + "..."
 			}
-			s.logger.Printf("[iClock Protocol]   ATTLOG body (truncated): %s", preview)
+			s.logger.Printf("[ADMS Protocol]   ATTLOG body (truncated): %s", preview)
 		}
 
 		records := s.parseAttendanceRecords(string(body), serialNumber)
@@ -305,7 +305,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				}
 			})
 			if !ok {
-				s.logger.Printf("[iClock Protocol] FAIL: callback queue full, %d records from device %s not processed",
+				s.logger.Printf("[ADMS Protocol] FAIL: callback queue full, %d records from device %s not processed",
 					len(records), serialNumber)
 				http.Error(w,
 					fmt.Sprintf("FAIL: callback queue full, %d records not processed", len(records)),
@@ -334,7 +334,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				info := s.parseDeviceInfo(string(body))
 				sn := serialNumber
 				if !s.dispatchCallback(func() { cb(sn, info) }) {
-					s.logger.Printf("[iClock Protocol] WARNING: callback queue full, device info from %s dropped", serialNumber)
+					s.logger.Printf("[ADMS Protocol] WARNING: callback queue full, device info from %s dropped", serialNumber)
 				}
 			}
 			if len(body) > 0 {
@@ -342,7 +342,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				if len(preview) > 200 {
 					preview = preview[:200] + "..."
 				}
-				s.logger.Printf("[iClock Protocol]   INFO body (truncated): %s", preview)
+				s.logger.Printf("[ADMS Protocol]   INFO body (truncated): %s", preview)
 			}
 		}
 
@@ -361,7 +361,7 @@ func (s *IClockServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleGetRequest handles the /iclock/getrequest endpoint
-func (s *IClockServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -376,7 +376,7 @@ func (s *IClockServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) 
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
 
-	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 
 	// Check for pending commands
 	commands := s.GetCommands(serialNumber)
@@ -392,7 +392,7 @@ func (s *IClockServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) 
 }
 
 // HandleDeviceCmd handles the /iclock/devicecmd endpoint
-func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -407,7 +407,7 @@ func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
 
-	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 
 	// Device is reporting command execution result
 	body, err := io.ReadAll(r.Body)
@@ -420,7 +420,7 @@ func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 		if len(preview) > 200 {
 			preview = preview[:200] + "..."
 		}
-		s.logger.Printf("[iClock Protocol]   devicecmd body (truncated): %s", preview)
+		s.logger.Printf("[ADMS Protocol]   devicecmd body (truncated): %s", preview)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -428,7 +428,7 @@ func (s *IClockServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateDeviceActivity updates the last activity timestamp for a device
-func (s *IClockServer) updateDeviceActivity(serialNumber string) {
+func (s *ADMSServer) updateDeviceActivity(serialNumber string) {
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
 
@@ -443,7 +443,7 @@ func (s *IClockServer) updateDeviceActivity(serialNumber string) {
 	}
 }
 
-func (s *IClockServer) isDeviceOnline(device *Device) bool {
+func (s *ADMSServer) isDeviceOnline(device *Device) bool {
 	if device == nil {
 		return false
 	}
@@ -454,7 +454,7 @@ func (s *IClockServer) isDeviceOnline(device *Device) bool {
 // Each line must have at least a UserID and a parseable timestamp (either
 // "2006-01-02 15:04:05" format or a Unix epoch integer). Malformed lines are
 // skipped and logged so downstream systems never receive zero-value timestamps.
-func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) []AttendanceRecord {
+func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []AttendanceRecord {
 	var records []AttendanceRecord
 	var skipped int
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
@@ -524,7 +524,7 @@ func (s *IClockServer) parseAttendanceRecords(data string, serialNumber string) 
 }
 
 // parseDeviceInfo parses device information from POST data
-func (s *IClockServer) parseDeviceInfo(data string) map[string]string {
+func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
 	info := make(map[string]string)
 
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
@@ -538,7 +538,7 @@ func (s *IClockServer) parseDeviceInfo(data string) map[string]string {
 }
 
 // ServeHTTP implements http.Handler interface for convenient routing
-func (s *IClockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
 	case strings.HasSuffix(path, "/iclock/cdata"):
@@ -557,18 +557,18 @@ func (s *IClockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // SendCommand sends a command to a device (to be retrieved on next poll)
-func (s *IClockServer) SendCommand(serialNumber, command string) {
+func (s *ADMSServer) SendCommand(serialNumber, command string) {
 	s.QueueCommand(serialNumber, command)
 }
 
 // SendDataCommand formats and sends a DATA command
-func (s *IClockServer) SendDataCommand(serialNumber, table, data string) {
+func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) {
 	cmd := fmt.Sprintf("DATA QUERY %s\n%s", table, data)
 	s.SendCommand(serialNumber, cmd)
 }
 
 // SendInfoCommand requests device information
-func (s *IClockServer) SendInfoCommand(serialNumber string) {
+func (s *ADMSServer) SendInfoCommand(serialNumber string) {
 	s.SendCommand(serialNumber, "INFO")
 }
 
@@ -591,7 +591,7 @@ func ParseQueryParams(urlStr string) (map[string]string, error) {
 
 // ListDevices returns copies of all registered devices.
 // The returned slice and Device values are safe to use without additional locking.
-func (s *IClockServer) ListDevices() []*Device {
+func (s *ADMSServer) ListDevices() []*Device {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
 
@@ -606,7 +606,7 @@ func (s *IClockServer) ListDevices() []*Device {
 // --- Additional Handlers & Parsers ---
 
 // HandleRegistry processes /iclock/registry requests for device registration & capabilities
-func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -620,10 +620,10 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
-	s.logger.Printf("[iClock Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag"} {
 		if v := query.Get(k); v != "" {
-			s.logger.Printf("[iClock Protocol]   %s: %s", k, v)
+			s.logger.Printf("[ADMS Protocol]   %s: %s", k, v)
 		}
 	}
 	body, err := io.ReadAll(r.Body)
@@ -636,7 +636,7 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		if len(preview) > 300 {
 			preview = preview[:300] + "..."
 		}
-		s.logger.Printf("[iClock Protocol]   Body (truncated): %s", preview)
+		s.logger.Printf("[ADMS Protocol]   Body (truncated): %s", preview)
 		info := s.parseRegistryBody(string(body))
 		s.devicesMutex.Lock()
 		if dev := s.devices[serialNumber]; dev != nil {
@@ -646,7 +646,7 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		if cb := s.OnRegistry; cb != nil {
 			sn := serialNumber
 			if !s.dispatchCallback(func() { cb(sn, info) }) {
-				s.logger.Printf("[iClock Protocol] WARNING: callback queue full, registry info from %s dropped", serialNumber)
+				s.logger.Printf("[ADMS Protocol] WARNING: callback queue full, registry info from %s dropped", serialNumber)
 			}
 		}
 	}
@@ -655,7 +655,7 @@ func (s *IClockServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleInspect serves /iclock/inspect returning JSON device snapshot
-func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
+func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -689,7 +689,7 @@ func (s *IClockServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseRegistryBody parses comma-separated key=value pairs from registry POST body
-func (s *IClockServer) parseRegistryBody(data string) map[string]string {
+func (s *ADMSServer) parseRegistryBody(data string) map[string]string {
 	info := make(map[string]string)
 	for part := range strings.SplitSeq(data, ",") {
 		part = strings.TrimSpace(part)

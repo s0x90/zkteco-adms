@@ -31,7 +31,7 @@ import (
 
 func main() {
     // Create the server
-    server := zkdevicesync.NewIClockServer()
+    server := zkdevicesync.NewADMSServer()
     
     // Handle attendance records
     server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
