@@ -23,6 +23,7 @@ package zkdevicesync
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -170,10 +171,16 @@ func (s *ADMSServer) safeCall(fn func()) {
 
 // readBody reads the request body with a size limit enforced by http.MaxBytesReader.
 // It returns the body bytes or writes an HTTP error and returns a non-nil error.
+// Oversized requests receive a 413 status; other read failures receive a 400.
 func (s *ADMSServer) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			s.logger.Printf("[ADMS Protocol] request body too large (limit %d bytes)", s.maxBodySize)
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return nil, err
+		}
 		s.logger.Printf("[ADMS Protocol] failed to read body: %v", err)
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return nil, err

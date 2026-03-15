@@ -1179,3 +1179,80 @@ func TestClose_ConcurrentDispatchAndClose(t *testing.T) {
 		t.Errorf("accepted=%d but executed=%d; Close did not drain all accepted callbacks", a, e)
 	}
 }
+
+func TestReadBody_ExceedsLimit(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.maxBodySize = 10 // 10 bytes limit
+	server.RegisterDevice("TEST001")
+
+	// Send a body larger than the limit via the ATTLOG handler.
+	largeBody := strings.Repeat("x", 20)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=TEST001&table=ATTLOG", strings.NewReader(largeBody))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected status %d for oversized body, got %d", http.StatusRequestEntityTooLarge, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Request body too large") {
+		t.Errorf("expected 'Request body too large' in response, got %q", w.Body.String())
+	}
+}
+
+func TestReadBody_WithinLimit(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.maxBodySize = 1024 // 1 KB limit
+	server.RegisterDevice("TEST001")
+
+	body := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=TEST001&table=ATTLOG", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d for body within limit, got %d", http.StatusOK, w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "OK") {
+		t.Errorf("expected 'OK' in response, got %q", w.Body.String())
+	}
+}
+
+func TestReadBody_ExceedsLimit_DeviceCmd(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.maxBodySize = 5
+	server.RegisterDevice("TEST001")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=TEST001", strings.NewReader("this body exceeds the limit"))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected status %d, got %d", http.StatusRequestEntityTooLarge, w.Code)
+	}
+}
+
+func TestReadBody_ExceedsLimit_Registry(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.maxBodySize = 5
+	server.RegisterDevice("TEST001")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/registry?SN=TEST001", strings.NewReader("DeviceType=acc,DeviceName=SpeedFace"))
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected status %d, got %d", http.StatusRequestEntityTooLarge, w.Code)
+	}
+}
