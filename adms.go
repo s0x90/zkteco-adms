@@ -32,6 +32,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,21 +53,36 @@ const (
 	// defaultDispatchTimeout is the maximum duration a dispatch will block
 	// when the callback channel is full before dropping the event.
 	defaultDispatchTimeout = 1 * time.Second
+
+	// maxSerialNumberLength is the maximum allowed length for a device serial number.
+	maxSerialNumberLength = 64
 )
 
-// Sentinel errors defined for use by callers.
-//
-// These errors are not yet returned by any exported method but are provided
-// so that callers can prepare error-matching logic (e.g. errors.Is) for
-// future versions where they will be surfaced from relevant operations.
+// Sentinel errors returned by the server.
 var (
-	// ErrServerClosed indicates an operation was attempted on a closed server.
+	// ErrServerClosed is returned when an operation is attempted on a closed server.
 	ErrServerClosed = errors.New("zkdevicesync: server closed")
 
-	// ErrCallbackQueueFull indicates the callback queue is full and the
+	// ErrCallbackQueueFull is returned when the callback queue is full and the
 	// dispatch timeout has expired.
 	ErrCallbackQueueFull = errors.New("zkdevicesync: callback queue full")
+
+	// ErrMaxDevicesReached is returned by [ADMSServer.RegisterDevice] when the
+	// device limit configured via [WithMaxDevices] has been reached.
+	ErrMaxDevicesReached = errors.New("zkdevicesync: maximum number of devices reached")
+
+	// ErrCommandQueueFull is returned by [ADMSServer.QueueCommand] when the
+	// per-device command queue limit configured via [WithMaxCommandsPerDevice]
+	// has been reached.
+	ErrCommandQueueFull = errors.New("zkdevicesync: command queue full for device")
+
+	// ErrInvalidSerialNumber is returned when a serial number fails validation.
+	ErrInvalidSerialNumber = errors.New("zkdevicesync: invalid serial number")
 )
+
+// serialNumberRe matches valid device serial numbers: 1–64 alphanumeric
+// characters, hyphens, or underscores.
+var serialNumberRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Option configures an [ADMSServer]. Use the With* functions to obtain options.
 type Option func(*ADMSServer)
@@ -159,6 +175,41 @@ func WithBaseContext(ctx context.Context) Option {
 	}
 }
 
+// WithMaxDevices sets the maximum number of devices that can be registered
+// simultaneously. When the limit is reached, new device registrations from
+// HTTP requests are rejected with 503 Service Unavailable.
+// A value of 0 (the default) means unlimited.
+func WithMaxDevices(n int) Option {
+	return func(s *ADMSServer) {
+		if n >= 0 {
+			s.maxDevices = n
+		}
+	}
+}
+
+// WithMaxCommandsPerDevice sets the maximum number of queued commands per
+// device. When the limit is reached, [ADMSServer.QueueCommand] returns
+// [ErrCommandQueueFull].
+// A value of 0 (the default) means unlimited.
+func WithMaxCommandsPerDevice(n int) Option {
+	return func(s *ADMSServer) {
+		if n >= 0 {
+			s.maxCommandsPerDevice = n
+		}
+	}
+}
+
+// WithEnableInspect enables the /iclock/inspect endpoint in the default
+// [ADMSServer.ServeHTTP] router. By default, the inspect endpoint is
+// disabled because it exposes device metadata (serial numbers, last
+// activity, options) without authentication. You can always register
+// [ADMSServer.HandleInspect] manually on a separate, authenticated route.
+func WithEnableInspect() Option {
+	return func(s *ADMSServer) {
+		s.enableInspect = true
+	}
+}
+
 // Device represents a ZKTeco device
 type Device struct {
 	SerialNumber string
@@ -238,6 +289,10 @@ type ADMSServer struct {
 	callbackBufferSize int           // capacity of callbackCh (used at construction)
 	onlineThreshold    time.Duration // duration before device is considered offline
 	dispatchTimeout    time.Duration // max block time for callback dispatch
+
+	maxDevices           int  // 0 = unlimited
+	maxCommandsPerDevice int  // 0 = unlimited
+	enableInspect        bool // false = /iclock/inspect not routed in ServeHTTP
 
 	baseCtx       context.Context
 	baseCtxCancel context.CancelFunc
@@ -459,18 +514,78 @@ func bodyPreview(body []byte) string {
 	return preview
 }
 
+// validateSerialNumber checks that a serial number is non-empty and matches
+// the expected format (1–64 alphanumeric characters, hyphens, or underscores).
+func validateSerialNumber(sn string) error {
+	if sn == "" {
+		return fmt.Errorf("%w: empty serial number", ErrInvalidSerialNumber)
+	}
+	if len(sn) > maxSerialNumberLength {
+		return fmt.Errorf("%w: exceeds %d characters", ErrInvalidSerialNumber, maxSerialNumberLength)
+	}
+	if !serialNumberRe.MatchString(sn) {
+		return fmt.Errorf("%w: contains invalid characters", ErrInvalidSerialNumber)
+	}
+	return nil
+}
+
+// requireSerialNumber extracts and validates the SN query parameter.
+// On failure it writes an HTTP error response and returns ("", false).
+func (s *ADMSServer) requireSerialNumber(w http.ResponseWriter, r *http.Request) (string, bool) {
+	sn := r.URL.Query().Get("SN")
+	if sn == "" {
+		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+		return "", false
+	}
+	if err := validateSerialNumber(sn); err != nil {
+		s.logger.Warn("invalid serial number", "sn", sn, "error", err)
+		http.Error(w, "Invalid SN parameter", http.StatusBadRequest)
+		return "", false
+	}
+	return sn, true
+}
+
+// registerOrReject calls RegisterDevice and writes an appropriate HTTP error
+// if registration fails (e.g. device limit reached). Returns true on success.
+func (s *ADMSServer) registerOrReject(w http.ResponseWriter, serialNumber string) bool {
+	if err := s.RegisterDevice(serialNumber); err != nil {
+		if errors.Is(err, ErrMaxDevicesReached) {
+			s.logger.Warn("device limit reached, rejecting registration",
+				"device", serialNumber, "limit", s.maxDevices)
+			http.Error(w, "Device limit reached", http.StatusServiceUnavailable)
+		} else {
+			s.logger.Warn("device registration failed",
+				"device", serialNumber, "error", err)
+			http.Error(w, "Invalid SN parameter", http.StatusBadRequest)
+		}
+		return false
+	}
+	return true
+}
+
 // RegisterDevice registers a new device.
-func (s *ADMSServer) RegisterDevice(serialNumber string) {
+// It returns [ErrMaxDevicesReached] if the server's device limit (configured
+// via [WithMaxDevices]) has been reached and the device is not already known.
+// It returns [ErrInvalidSerialNumber] if the serial number is malformed.
+func (s *ADMSServer) RegisterDevice(serialNumber string) error {
+	if err := validateSerialNumber(serialNumber); err != nil {
+		return err
+	}
+
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
 
 	if _, exists := s.devices[serialNumber]; !exists {
+		if s.maxDevices > 0 && len(s.devices) >= s.maxDevices {
+			return ErrMaxDevicesReached
+		}
 		s.devices[serialNumber] = &Device{
 			SerialNumber: serialNumber,
 			LastActivity: time.Now(),
 			Options:      make(map[string]string),
 		}
 	}
+	return nil
 }
 
 // GetDevice retrieves a copy of device information.
@@ -495,11 +610,17 @@ func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 }
 
 // QueueCommand adds a command to be sent to the device on its next poll.
-func (s *ADMSServer) QueueCommand(serialNumber, command string) {
+// It returns [ErrCommandQueueFull] if the per-device limit configured via
+// [WithMaxCommandsPerDevice] has been reached.
+func (s *ADMSServer) QueueCommand(serialNumber, command string) error {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
+	if s.maxCommandsPerDevice > 0 && len(s.commandQueue[serialNumber]) >= s.maxCommandsPerDevice {
+		return ErrCommandQueueFull
+	}
 	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], command)
+	return nil
 }
 
 // DrainCommands retrieves and removes all pending commands for a device.
@@ -529,18 +650,19 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := r.URL.Query()
-	serialNumber := query.Get("SN")
-	if serialNumber == "" {
-		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+	serialNumber, ok := s.requireSerialNumber(w, r)
+	if !ok {
 		return
 	}
 
 	// Register/update device
-	s.RegisterDevice(serialNumber)
+	if !s.registerOrReject(w, serialNumber) {
+		return
+	}
 	s.updateDeviceActivity(serialNumber)
 
 	// Logging basic request info
+	query := r.URL.Query()
 	s.logger.Debug("cdata request",
 		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag", "table"} {
@@ -621,13 +743,14 @@ func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serialNumber := r.URL.Query().Get("SN")
-	if serialNumber == "" {
-		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+	serialNumber, ok := s.requireSerialNumber(w, r)
+	if !ok {
 		return
 	}
 
-	s.RegisterDevice(serialNumber)
+	if !s.registerOrReject(w, serialNumber) {
+		return
+	}
 	s.updateDeviceActivity(serialNumber)
 
 	s.logger.Debug("getrequest",
@@ -653,13 +776,14 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	serialNumber := r.URL.Query().Get("SN")
-	if serialNumber == "" {
-		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+	serialNumber, ok := s.requireSerialNumber(w, r)
+	if !ok {
 		return
 	}
 
-	s.RegisterDevice(serialNumber)
+	if !s.registerOrReject(w, serialNumber) {
+		return
+	}
 	s.updateDeviceActivity(serialNumber)
 
 	s.logger.Debug("devicecmd",
@@ -801,6 +925,10 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/iclock/registry"):
 		s.HandleRegistry(w, r)
 	case strings.HasSuffix(path, "/iclock/inspect"):
+		if !s.enableInspect {
+			http.NotFound(w, r)
+			return
+		}
 		s.HandleInspect(w, r)
 	default:
 		http.NotFound(w, r)
@@ -809,21 +937,23 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // SendCommand sends a command to a device (to be retrieved on next poll).
 //
-// Deprecated: SendCommand is a trivial alias for [ADMSServer.QueueCommand].
-// Use QueueCommand directly.
+// Deprecated: SendCommand is a trivial wrapper around [ADMSServer.QueueCommand].
+// Use QueueCommand directly to observe the returned error.
 func (s *ADMSServer) SendCommand(serialNumber, command string) {
-	s.QueueCommand(serialNumber, command)
+	_ = s.QueueCommand(serialNumber, command)
 }
 
-// SendDataCommand formats and sends a DATA command.
-func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) {
+// SendDataCommand formats and queues a DATA QUERY command.
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) error {
 	cmd := fmt.Sprintf("DATA QUERY %s\n%s", table, data)
-	s.QueueCommand(serialNumber, cmd)
+	return s.QueueCommand(serialNumber, cmd)
 }
 
-// SendInfoCommand requests device information.
-func (s *ADMSServer) SendInfoCommand(serialNumber string) {
-	s.QueueCommand(serialNumber, "INFO")
+// SendInfoCommand queues an INFO command to request device information.
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "INFO")
 }
 
 // ParseQueryParams parses URL query parameters commonly used in iclock protocol.
@@ -866,14 +996,15 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := r.URL.Query()
-	serialNumber := query.Get("SN")
-	if serialNumber == "" {
-		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+	serialNumber, ok := s.requireSerialNumber(w, r)
+	if !ok {
 		return
 	}
-	s.RegisterDevice(serialNumber)
+	if !s.registerOrReject(w, serialNumber) {
+		return
+	}
 	s.updateDeviceActivity(serialNumber)
+	query := r.URL.Query()
 	s.logger.Debug("registry request",
 		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag"} {

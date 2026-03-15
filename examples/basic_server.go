@@ -16,6 +16,9 @@ import (
 func main() {
 	// Create a new ADMS server with functional options
 	server := zkdevicesync.NewADMSServer(
+		// Enable the /iclock/inspect debug endpoint.
+		zkdevicesync.WithEnableInspect(),
+
 		// Callback for attendance records
 		zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
 			fmt.Printf("Attendance Record:\n")
@@ -53,9 +56,14 @@ func main() {
 	)
 	defer server.Close()
 
-	// Register some known devices (optional)
-	server.RegisterDevice("DEVICE001")
-	server.RegisterDevice("DEVICE002")
+	// Register some known devices (optional).
+	// RegisterDevice now returns an error for invalid serial numbers or
+	// when the device limit (WithMaxDevices) has been reached.
+	for _, sn := range []string{"DEVICE001", "DEVICE002"} {
+		if err := server.RegisterDevice(sn); err != nil {
+			log.Fatalf("failed to register device %s: %v", sn, err)
+		}
+	}
 
 	// Set up HTTP routes
 	http.Handle("/iclock/", server)
@@ -90,7 +98,10 @@ func main() {
 			return
 		}
 
-		server.QueueCommand(sn, cmd)
+		if err := server.QueueCommand(sn, cmd); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
 	})
 
@@ -102,7 +113,7 @@ func main() {
 	fmt.Println("  /iclock/registry - Device registry/capabilities endpoint")
 	fmt.Println("  /iclock/getrequest - Device polling endpoint")
 	fmt.Println("  /iclock/devicecmd - Command confirmation endpoint")
-	fmt.Println("  /iclock/inspect - JSON device snapshot")
+	fmt.Println("  /iclock/inspect - JSON device snapshot (opt-in via WithEnableInspect)")
 	fmt.Println("  /status - View connected devices")
 	fmt.Println("  /command - Send commands to devices (POST)")
 	fmt.Println()

@@ -152,7 +152,9 @@ go func() {
 ### Request Device Information
 
 ```go
-server.SendInfoCommand("DEVICE001")
+if err := server.SendInfoCommand("DEVICE001"); err != nil {
+    log.Printf("Failed to queue INFO command: %v", err)
+}
 ```
 
 The device will respond with its configuration, which you can handle:
@@ -172,8 +174,10 @@ defer server.Close()
 ### Custom Commands
 
 ```go
-// Queue a command for the device
-server.QueueCommand("DEVICE001", "CHECK")
+// Queue a command for the device (returns error if queue limit reached)
+if err := server.QueueCommand("DEVICE001", "CHECK"); err != nil {
+    log.Printf("Failed to queue command: %v", err)
+}
 
 // Drain all pending commands (useful for custom polling logic)
 cmds := server.DrainCommands("DEVICE001")
@@ -194,6 +198,15 @@ server := zkdevicesync.NewADMSServer(
     // Consider devices offline after 5 minutes of inactivity
     zkdevicesync.WithOnlineThreshold(5 * time.Minute),
 
+    // Limit registered devices (0 = unlimited)
+    zkdevicesync.WithMaxDevices(100),
+
+    // Limit queued commands per device (0 = unlimited)
+    zkdevicesync.WithMaxCommandsPerDevice(50),
+
+    // Enable the /iclock/inspect debug endpoint (disabled by default)
+    zkdevicesync.WithEnableInspect(),
+
     // Tie the server to an application-level context
     zkdevicesync.WithBaseContext(appCtx),
 
@@ -207,9 +220,15 @@ defer server.Close()
 
 ## Monitoring Connected Devices
 
-The library provides a built-in JSON inspection endpoint:
+The library provides a built-in JSON inspection endpoint. It is **disabled by default** in the `ServeHTTP` router for security. Enable it with `WithEnableInspect()`, or register the handler directly on your own mux:
 
 ```go
+// Option 1: Enable in the default router
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithEnableInspect(),
+)
+
+// Option 2: Register on your own mux (always available)
 http.HandleFunc("/iclock/inspect", server.HandleInspect)
 ```
 
@@ -303,14 +322,21 @@ For issues or questions:
 
 ## Security Considerations
 
-**Important for Production:**
+**Built-in protections:**
+
+- **Serial number validation** — all endpoints reject malformed device IDs (empty, too long, special characters)
+- **Device registration limits** — `WithMaxDevices(n)` caps how many devices can register
+- **Command queue limits** — `WithMaxCommandsPerDevice(n)` prevents unbounded queue growth
+- **Request body limits** — `WithMaxBodySize(n)` prevents oversized payloads
+- **Debug endpoint opt-in** — `/iclock/inspect` is disabled unless `WithEnableInspect()` is set
+
+**Additional measures for production:**
 
 1. **Add authentication** - the basic protocol doesn't include authentication
 2. **Use HTTPS** - set up a reverse proxy with TLS
-3. **Validate input** - always validate device serial numbers and user IDs
-4. **Rate limiting** - prevent abuse with rate limiting middleware
-5. **Access control** - restrict which IPs can connect
-6. **Log monitoring** - monitor for suspicious activity
+3. **Rate limiting** - prevent abuse with rate limiting middleware
+4. **Access control** - restrict which IPs can connect
+5. **Log monitoring** - monitor for suspicious activity
 
 Example with basic authentication:
 

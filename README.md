@@ -20,6 +20,9 @@ Zero external dependencies — pure Go standard library.
 - **Heartbeat & Online Status**: Tracks last activity per device with configurable online threshold
 - **Concurrent-Safe**: Built with goroutine-safe data structures and async callback dispatch
 - **Request Body Limits**: Configurable `MaxBytesReader` protection against oversized payloads
+- **Serial Number Validation**: Rejects malformed device identifiers at the protocol boundary
+- **Device & Command Limits**: Configurable caps on registered devices and per-device command queue depth
+- **Opt-In Debug Endpoint**: `/iclock/inspect` is disabled by default, enabled via `WithEnableInspect()`
 - **Graceful Shutdown**: `Close()` drains pending callbacks and cancels the base context
 
 ## Installation
@@ -114,6 +117,9 @@ defer server.Close()
 | `WithOnlineThreshold` | 2 min | Duration before a device is considered offline |
 | `WithDispatchTimeout` | 1 sec | Max block time when callback queue is full |
 | `WithBaseContext` | `context.Background()` | Parent context for callbacks |
+| `WithMaxDevices` | 0 (unlimited) | Max registered devices; returns `ErrMaxDevicesReached` |
+| `WithMaxCommandsPerDevice` | 0 (unlimited) | Max queued commands per device; returns `ErrCommandQueueFull` |
+| `WithEnableInspect` | disabled | Enable the `/iclock/inspect` debug endpoint |
 | `WithOnAttendance` | nil | Attendance record callback |
 | `WithOnDeviceInfo` | nil | Device info callback |
 | `WithOnRegistry` | nil | Device registry callback |
@@ -154,14 +160,14 @@ zkdevicesync.WithOnRegistry(func(ctx context.Context, sn string, info map[string
 ### Sending Commands to Devices
 
 ```go
-// Queue a custom command
-server.QueueCommand("DEVICE001", "CHECK")
+// Queue a custom command (returns ErrCommandQueueFull if limit reached)
+err := server.QueueCommand("DEVICE001", "CHECK")
 
 // Request device information
-server.SendInfoCommand("DEVICE001")
+err = server.SendInfoCommand("DEVICE001")
 
 // Send data query command
-server.SendDataCommand("DEVICE001", "USER", "user data")
+err = server.SendDataCommand("DEVICE001", "USER", "user data")
 
 // Drain all pending commands for a device
 cmds := server.DrainCommands("DEVICE001")
@@ -195,15 +201,18 @@ http.HandleFunc("/iclock/cdata", server.HandleCData)
 http.HandleFunc("/iclock/registry", server.HandleRegistry)
 http.HandleFunc("/iclock/getrequest", server.HandleGetRequest)
 http.HandleFunc("/iclock/devicecmd", server.HandleDeviceCmd)
-http.HandleFunc("/iclock/inspect", server.HandleInspect)
+http.HandleFunc("/iclock/inspect", server.HandleInspect) // opt-in: not routed by ServeHTTP unless WithEnableInspect is set
 ```
 
 ### Sentinel Errors
 
 ```go
 var (
-    zkdevicesync.ErrServerClosed     // operation attempted on a closed server
-    zkdevicesync.ErrCallbackQueueFull // callback queue full, dispatch timed out
+    zkdevicesync.ErrServerClosed       // operation attempted on a closed server
+    zkdevicesync.ErrCallbackQueueFull  // callback queue full, dispatch timed out
+    zkdevicesync.ErrMaxDevicesReached  // device limit reached (WithMaxDevices)
+    zkdevicesync.ErrCommandQueueFull   // per-device command queue full (WithMaxCommandsPerDevice)
+    zkdevicesync.ErrInvalidSerialNumber // serial number failed validation
 )
 ```
 
@@ -228,7 +237,7 @@ server.Close()
 | `/iclock/registry` | GET/POST | Device registration and capability payloads (key=value comma-separated) |
 | `/iclock/getrequest` | GET | Device polls for pending commands |
 | `/iclock/devicecmd` | POST | Device reports command execution results |
-| `/iclock/inspect` | GET | Returns JSON summary of devices and their current status |
+| `/iclock/inspect` | GET | Returns JSON summary of devices and their current status (opt-in via `WithEnableInspect`) |
 
 ### Registry Payload Parsing
 
@@ -359,6 +368,9 @@ Creates a new ADMS server instance configured with the given options.
 | `WithOnlineThreshold(time.Duration)` | Set device online threshold |
 | `WithDispatchTimeout(time.Duration)` | Set callback dispatch timeout |
 | `WithBaseContext(context.Context)` | Set parent context |
+| `WithMaxDevices(int)` | Set max registered devices |
+| `WithMaxCommandsPerDevice(int)` | Set max command queue depth per device |
+| `WithEnableInspect()` | Enable `/iclock/inspect` in ServeHTTP router |
 | `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
 | `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
 | `WithOnRegistry(func(context.Context, string, map[string]string))` | Set registry callback |
@@ -368,13 +380,13 @@ Creates a new ADMS server instance configured with the given options.
 | Method | Description |
 |--------|-------------|
 | `Close()` | Drain callbacks and stop the worker goroutine |
-| `RegisterDevice(serialNumber string)` | Register a device |
+| `RegisterDevice(serialNumber string) error` | Register a device; validates SN, respects device limit |
 | `GetDevice(serialNumber string) *Device` | Get device information (returns a copy) |
 | `IsDeviceOnline(serialNumber string) bool` | Check if a device is online |
-| `QueueCommand(serialNumber, command string)` | Queue a command for a device |
+| `QueueCommand(serialNumber, command string) error` | Queue a command; respects per-device limit |
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
-| `SendInfoCommand(serialNumber string)` | Queue an INFO command |
-| `SendDataCommand(serialNumber, table, data string)` | Queue a DATA QUERY command |
+| `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
+| `SendDataCommand(serialNumber, table, data string) error` | Queue a DATA QUERY command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |
@@ -394,6 +406,9 @@ Parses URL query parameters into a map.
 |-------|-------------|
 | `ErrServerClosed` | Returned when an operation is attempted on a closed server |
 | `ErrCallbackQueueFull` | Returned when the callback queue is full and dispatch timed out |
+| `ErrMaxDevicesReached` | Returned by `RegisterDevice` when the device limit is reached |
+| `ErrCommandQueueFull` | Returned by `QueueCommand` when the per-device command limit is reached |
+| `ErrInvalidSerialNumber` | Returned when a serial number is empty, too long, or contains invalid characters |
 
 ### Deprecated
 
