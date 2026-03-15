@@ -1,14 +1,14 @@
 # ZK Device Sync
 
-A Go library implementing the iClock (ZKTeco ADMS) protocol for ZKTeco biometric attendance devices.
+A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendance devices.
 
 ## Overview
 
-This library provides a complete implementation of the HTTP-based iClock protocol used by ZKTeco devices to communicate with servers. It handles device registration, attendance data collection, and remote command execution.
+This library provides a complete implementation of the HTTP-based ADMS protocol used by ZKTeco devices to communicate with servers. It handles device registration, attendance data collection, and remote command execution.
 
 ## Features
 
-- **Full iClock Protocol Support**: Implements all standard endpoints (`/iclock/cdata`, `/iclock/getrequest`, `/iclock/devicecmd`) plus device registry and inspection endpoints
+- **Full ADMS Protocol Support**: Implements all standard endpoints (`/iclock/cdata`, `/iclock/getrequest`, `/iclock/devicecmd`) plus device registry and inspection endpoints
 - **Attendance Data Processing**: Parses and processes attendance logs with multiple timestamp formats
 - **Device Management**: Thread-safe device registration and tracking
 - **Command Queuing**: Queue and send commands to devices remotely
@@ -36,8 +36,8 @@ import (
 )
 
 func main() {
-    // Create a new iclock server
-    server := zkdevicesync.NewIClockServer()
+    // Create a new ADMS server
+    server := zkdevicesync.NewADMSServer()
     
     // Set up callback for attendance records
     server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
@@ -75,7 +75,7 @@ func getStatusString(status int) string {
 ### Creating a Server
 
 ```go
-server := zkdevicesync.NewIClockServer()
+server := zkdevicesync.NewADMSServer()
 ```
 
 ### Handling Attendance Records
@@ -146,7 +146,7 @@ http.HandleFunc("/iclock/inspect", server.HandleInspect)   // JSON snapshot of d
 
 ## Protocol Details
 
-### iClock Protocol Endpoints
+### ADMS Protocol Endpoints
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -265,7 +265,7 @@ go test -bench=.
 
 ### Types
 
-#### `IClockServer`
+#### `ADMSServer`
 Main server structure handling all protocol operations.
 
 #### `Device`
@@ -276,28 +276,28 @@ Represents a single attendance transaction.
 
 ### Functions
 
-#### `NewIClockServer() *IClockServer`
-Creates a new iclock server instance.
+#### `NewADMSServer() *ADMSServer`
+Creates a new ADMS server instance.
 
-#### `(*IClockServer) RegisterDevice(serialNumber string)`
+#### `(*ADMSServer) RegisterDevice(serialNumber string)`
 Registers a device with the server.
 
-#### `(*IClockServer) GetDevice(serialNumber string) *Device`
+#### `(*ADMSServer) GetDevice(serialNumber string) *Device`
 Retrieves device information.
 
-#### `(*IClockServer) QueueCommand(serialNumber, command string)`
+#### `(*ADMSServer) QueueCommand(serialNumber, command string)`
 Queues a command for a device.
 
-#### `(*IClockServer) SendCommand(serialNumber, command string)`
+#### `(*ADMSServer) SendCommand(serialNumber, command string)`
 Alias for QueueCommand.
 
-#### `(*IClockServer) SendInfoCommand(serialNumber string)`
+#### `(*ADMSServer) SendInfoCommand(serialNumber string)`
 Sends an INFO command to request device information.
 
-#### `(*IClockServer) SendDataCommand(serialNumber, table, data string)`
+#### `(*ADMSServer) SendDataCommand(serialNumber, table, data string)`
 Sends a DATA QUERY command.
 
-#### `(*IClockServer) ListDevices() []*Device`
+#### `(*ADMSServer) ListDevices() []*Device`
 Returns all registered devices.
 
 #### `ParseQueryParams(urlStr string) (map[string]string, error)`

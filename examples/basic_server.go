@@ -13,8 +13,8 @@ import (
 )
 
 func main() {
-	// Create a new iclock server
-	server := zkdevicesync.NewIClockServer()
+	// Create a new ADMS server
+	server := zkdevicesync.NewADMSServer()
 	defer server.Close()
 
 	// Set up callback for attendance records
