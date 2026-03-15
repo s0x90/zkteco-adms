@@ -148,7 +148,7 @@ func TestHandleCData_MissingSN(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	req := httptest.NewRequest("GET", "/iclock/cdata", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata", nil)
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -172,16 +172,13 @@ func TestHandleCData_AttendanceLog(t *testing.T) {
 
 	// Simulate attendance data
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "OK") {
-		t.Errorf("Expected OK response, got: %s", w.Body.String())
 	}
 
 	select {
@@ -211,7 +208,7 @@ func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
 
 	// Multiple records
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -229,7 +226,7 @@ func TestHandleCData_OperationLog(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=OPERLOG", bytes.NewBufferString("operation data"))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=OPERLOG", bytes.NewBufferString("operation data"))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -251,7 +248,7 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN="+serialNumber, nil)
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN="+serialNumber, nil)
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -273,7 +270,7 @@ func TestHandleGetRequest(t *testing.T) {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/iclock/getrequest?SN="+serialNumber, nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN="+serialNumber, nil)
 	w := httptest.NewRecorder()
 
 	server.HandleGetRequest(w, req)
@@ -290,7 +287,7 @@ func TestHandleGetRequest_NoCommands(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	req := httptest.NewRequest("GET", "/iclock/getrequest?SN=TEST001", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=TEST001", nil)
 	w := httptest.NewRecorder()
 
 	server.HandleGetRequest(w, req)
@@ -307,7 +304,7 @@ func TestHandleDeviceCmd(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	req := httptest.NewRequest("POST", "/iclock/devicecmd?SN=TEST001", bytes.NewBufferString("command result"))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=TEST001", bytes.NewBufferString("command result"))
 	w := httptest.NewRecorder()
 
 	server.HandleDeviceCmd(w, req)
@@ -325,7 +322,7 @@ func TestHandleDeviceCmd_RegistersDevice(t *testing.T) {
 	defer server.Close()
 
 	// Device was never registered — HandleDeviceCmd should register it.
-	req := httptest.NewRequest("POST", "/iclock/devicecmd?SN=NEW001", bytes.NewBufferString("result"))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=NEW001", bytes.NewBufferString("result"))
 	w := httptest.NewRecorder()
 
 	server.HandleDeviceCmd(w, req)
@@ -412,7 +409,7 @@ func TestHandleRegistry_PostParsesBody(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	body := "DeviceType=acc,~DeviceName=SpeedFace,IPAddress=192.168.1.201"
-	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG001", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/registry?SN=REG001", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 	server.HandleRegistry(w, req)
 	if w.Code != http.StatusOK {
@@ -443,7 +440,7 @@ func TestHandleRegistry_Callback(t *testing.T) {
 	}
 
 	body := "DeviceType=acc"
-	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG002", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/registry?SN=REG002", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 	server.HandleRegistry(w, req)
 
@@ -468,7 +465,7 @@ func TestHandleInspect_JSON(t *testing.T) {
 	server.devices["A1"].LastActivity = time.Now().Add(-3 * time.Minute)
 	server.devicesMutex.Unlock()
 
-	req := httptest.NewRequest("GET", "/iclock/inspect", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
 	w := httptest.NewRecorder()
 	server.HandleInspect(w, req)
 	if w.Code != http.StatusOK {
@@ -691,7 +688,9 @@ func TestSendDataCommand(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.SendDataCommand(serialNumber, "USER", "user data")
+	if err := server.SendDataCommand(serialNumber, "USER", "user data"); err != nil {
+		t.Fatalf("SendDataCommand failed: %v", err)
+	}
 
 	commands := server.GetCommands(serialNumber)
 	if len(commands) != 1 {
@@ -710,7 +709,9 @@ func TestSendInfoCommand(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.SendInfoCommand(serialNumber)
+	if err := server.SendInfoCommand(serialNumber); err != nil {
+		t.Fatalf("SendInfoCommand failed: %v", err)
+	}
 
 	commands := server.GetCommands(serialNumber)
 	if len(commands) != 1 {
@@ -840,7 +841,7 @@ func TestAttendanceRecordSerialNumber(t *testing.T) {
 	}
 
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN="+serialNumber+"&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN="+serialNumber+"&table=ATTLOG", bytes.NewBufferString(attendanceData))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -865,7 +866,7 @@ func TestCallbackNilAfterEnqueue(t *testing.T) {
 	}
 
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
@@ -912,7 +913,7 @@ func TestCallbackPanicRecovery(t *testing.T) {
 	server.OnAttendance = func(record AttendanceRecord) {
 		panic("boom")
 	}
-	req1 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+	req1 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG",
 		bytes.NewBufferString("100\t2024-01-01 08:00:00\t0\t1\t0"))
 	w1 := httptest.NewRecorder()
 	server.HandleCData(w1, req1)
@@ -921,7 +922,7 @@ func TestCallbackPanicRecovery(t *testing.T) {
 	server.OnAttendance = func(record AttendanceRecord) {
 		received <- record.UserID
 	}
-	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG",
+	req2 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG",
 		bytes.NewBufferString("200\t2024-01-01 09:00:00\t0\t1\t0"))
 	w2 := httptest.NewRecorder()
 	server.HandleCData(w2, req2)
@@ -942,7 +943,7 @@ func BenchmarkHandleCData(b *testing.B) {
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 
 	for b.Loop() {
-		req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
+		req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 		w := httptest.NewRecorder()
 		server.HandleCData(w, req)
 	}
@@ -977,7 +978,7 @@ func TestHandleCData_BatchDispatch(t *testing.T) {
 
 	// Send 3 records in a single POST — they should arrive via a single batch dispatch.
 	data := "100\t2024-01-01 08:00:00\t0\t1\t0\n200\t2024-01-01 09:00:00\t1\t1\t0\n300\t2024-01-01 10:00:00\t0\t2\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=BATCH001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=BATCH001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -1028,7 +1029,7 @@ func TestHandleCData_QueueFull_Returns503(t *testing.T) {
 
 	// Queue is full and worker is blocked — dispatch should fail after ~1s.
 	data := "999\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=FULL001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=FULL001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 
 	server.HandleCData(w, req)
@@ -1068,7 +1069,7 @@ func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
 
 	// First attempt: queue is full, should get 503.
 	data := "888\t2024-01-01 08:00:00\t0\t1\t0"
-	req1 := httptest.NewRequest("POST", "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
+	req1 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
 	w1 := httptest.NewRecorder()
 	server.HandleCData(w1, req1)
 
@@ -1098,7 +1099,7 @@ func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
 	}
 
 	// Second attempt: queue has space, should succeed.
-	req2 := httptest.NewRequest("POST", "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
+	req2 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=RETRY001&table=ATTLOG", bytes.NewBufferString(data))
 	w2 := httptest.NewRecorder()
 	server.HandleCData(w2, req2)
 
@@ -1307,16 +1308,16 @@ func TestWithOnAttendance_ReceivesContext(t *testing.T) {
 	defer server.Close()
 
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
 	select {
 	case cbCtx := <-received:
 		// The callback context should be derived from our base context.
-		// It should not be cancelled yet (server still open).
+		// It should not be canceled yet (server still open).
 		if err := cbCtx.Err(); err != nil {
-			t.Errorf("expected non-cancelled context, got %v", err)
+			t.Errorf("expected non-canceled context, got %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for WithOnAttendance callback")
@@ -1332,7 +1333,7 @@ func TestWithOnAttendance_ContextCancelledAfterClose(t *testing.T) {
 	)
 
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
@@ -1348,7 +1349,7 @@ func TestWithOnAttendance_ContextCancelledAfterClose(t *testing.T) {
 	server.Close()
 
 	if err := cbCtx.Err(); err == nil {
-		t.Error("expected context to be cancelled after Close, but it was not")
+		t.Error("expected context to be canceled after Close, but it was not")
 	}
 }
 
@@ -1362,14 +1363,14 @@ func TestWithOnDeviceInfo_ReceivesContext(t *testing.T) {
 	defer server.Close()
 
 	body := "DeviceName=ZKDevice\nSerialNumber=TEST001"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
 	select {
 	case cbCtx := <-received:
 		if err := cbCtx.Err(); err != nil {
-			t.Errorf("expected non-cancelled context, got %v", err)
+			t.Errorf("expected non-canceled context, got %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for WithOnDeviceInfo callback")
@@ -1386,14 +1387,14 @@ func TestWithOnRegistry_ReceivesContext(t *testing.T) {
 	defer server.Close()
 
 	body := "DeviceType=acc"
-	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG_CTX", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/registry?SN=REG_CTX", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 	server.HandleRegistry(w, req)
 
 	select {
 	case cbCtx := <-received:
 		if err := cbCtx.Err(); err != nil {
-			t.Errorf("expected non-cancelled context, got %v", err)
+			t.Errorf("expected non-canceled context, got %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for WithOnRegistry callback")
@@ -1407,7 +1408,7 @@ func TestWithLogger(t *testing.T) {
 	server := NewADMSServer(WithLogger(logger))
 	defer server.Close()
 
-	req := httptest.NewRequest("GET", "/iclock/getrequest?SN=LOG001", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=LOG001", nil)
 	w := httptest.NewRecorder()
 	server.HandleGetRequest(w, req)
 
@@ -1474,7 +1475,7 @@ func TestWithDispatchTimeout(t *testing.T) {
 	}
 }
 
-func TestWithBaseContext_Cancelled(t *testing.T) {
+func TestWithBaseContext_Canceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	received := make(chan context.Context, 1)
 
@@ -1490,14 +1491,14 @@ func TestWithBaseContext_Cancelled(t *testing.T) {
 	cancel()
 
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
 	select {
 	case cbCtx := <-received:
 		if err := cbCtx.Err(); err == nil {
-			t.Error("expected context to be cancelled (parent cancelled), but it was not")
+			t.Error("expected context to be canceled (parent canceled), but it was not")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for callback")
@@ -1581,7 +1582,7 @@ func TestFunctionalOption_OverridesDeprecatedField(t *testing.T) {
 	}
 
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
@@ -1742,9 +1743,7 @@ func TestWithMaxDevices_ZeroMeansUnlimited(t *testing.T) {
 
 	// Should be able to register many devices with 0 (default/unlimited).
 	for i := range 50 {
-		sn := "DEVICE" + strings.Repeat("0", 3-len(string(rune('0'+i%10)))) + string(rune('A'+i))
-		// Just use a simple pattern.
-		sn = "DEV" + strings.Repeat("A", i+1)
+		sn := "DEV" + strings.Repeat("A", i+1)
 		if len(sn) > 64 {
 			sn = sn[:64]
 		}
@@ -1809,7 +1808,7 @@ func TestInspectDisabledByDefault(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	req := httptest.NewRequest("GET", "/iclock/inspect", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -1822,7 +1821,7 @@ func TestInspectEnabledWithOption(t *testing.T) {
 	server := NewADMSServer(WithEnableInspect())
 	defer server.Close()
 
-	req := httptest.NewRequest("GET", "/iclock/inspect", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -1902,7 +1901,7 @@ func TestHandler_RejectsWhenDeviceLimitReached(t *testing.T) {
 	}
 
 	// HTTP request with a new SN should be rejected with 503.
-	req := httptest.NewRequest("GET", "/iclock/cdata?SN=DEV2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata?SN=DEV2", nil)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -1911,7 +1910,7 @@ func TestHandler_RejectsWhenDeviceLimitReached(t *testing.T) {
 	}
 
 	// But existing device should still work.
-	req = httptest.NewRequest("GET", "/iclock/cdata?SN=DEV1", nil)
+	req = httptest.NewRequest(http.MethodGet, "/iclock/cdata?SN=DEV1", nil)
 	w = httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 

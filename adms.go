@@ -185,7 +185,7 @@ func WithDispatchTimeout(d time.Duration) Option {
 
 // WithOnAttendance registers a callback invoked for each attendance record
 // received from a device. The context is derived from the server's base
-// context and is cancelled when the server is closed.
+// context and is canceled when the server is closed.
 func WithOnAttendance(fn func(ctx context.Context, record AttendanceRecord)) Option {
 	return func(s *ADMSServer) {
 		s.onAttendance = fn

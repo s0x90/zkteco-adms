@@ -1,5 +1,5 @@
 // Command database demonstrates a ZKTeco ADMS server with an in-memory
-// attendance store and JSON query endpoints, modelled after a typical
+// attendance store and JSON query endpoints, modeled after a typical
 // database-backed integration.
 //
 // Run with:
