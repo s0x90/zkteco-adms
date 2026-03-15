@@ -28,13 +28,18 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.3
+
       - name: Build
         run: go build ./...
 
-      - name: Build examples (tagged)
+      - name: Build examples
         run: |
-          go build -o /dev/null -tags basic_server ./examples/basic_server.go
-          go build -o /dev/null ./examples/database_integration.go
+          go build -o /dev/null ./examples/basic
+          go build -o /dev/null ./examples/database
 
       - name: Test
         run: go test -v -race -cover ./...
