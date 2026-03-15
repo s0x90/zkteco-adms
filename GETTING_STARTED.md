@@ -1,6 +1,6 @@
-# Getting Started with ZK Device Sync
+# Getting Started with ZKTeco Sync
 
-This guide will help you get started with the ZK Device Sync library for integrating ZKTeco biometric devices with your Go applications.
+This guide will help you get started with the ZKTeco Sync library for integrating ZKTeco biometric devices with your Go applications.
 
 ## Prerequisites
 
@@ -22,24 +22,25 @@ Create a file `main.go`:
 package main
 
 import (
+    "context"
     "fmt"
     "log"
     "net/http"
-    
+
     zkdevicesync "github.com/s0x90/zkteco-sync"
 )
 
 func main() {
-    // Create the server
-    server := zkdevicesync.NewADMSServer()
-    
-    // Handle attendance records
-    server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-        fmt.Printf("Attendance: User %s at %s\n", 
-            record.UserID, 
-            record.Timestamp)
-    }
-    
+    // Create the server with a callback for attendance records
+    server := zkdevicesync.NewADMSServer(
+        zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+            fmt.Printf("Attendance: User %s at %s\n",
+                record.UserID,
+                record.Timestamp)
+        }),
+    )
+    defer server.Close()
+
     // Start the HTTP server
     http.Handle("/iclock/", server)
     log.Println("Server running on :8080")
@@ -89,30 +90,38 @@ type AttendanceRecord struct {
 ### 1. Save to Database
 
 ```go
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    query := `INSERT INTO attendance (user_id, timestamp, status, device) 
-              VALUES (?, ?, ?, ?)`
-    _, err := db.Exec(query, 
-        record.UserID, 
-        record.Timestamp, 
-        record.Status,
-        record.SerialNumber)
-    if err != nil {
-        log.Printf("Error saving: %v", err)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        query := `INSERT INTO attendance (user_id, timestamp, status, device)
+                  VALUES (?, ?, ?, ?)`
+        _, err := db.ExecContext(ctx, query,
+            record.UserID,
+            record.Timestamp,
+            record.Status,
+            record.SerialNumber)
+        if err != nil {
+            log.Printf("Error saving: %v", err)
+        }
+    }),
+)
+defer server.Close()
 ```
+
+Note: the `ctx` passed to your callback is derived from the server's base context and will be cancelled when `server.Close()` is called, which makes it ideal for database calls.
 
 ### 2. Send Notifications
 
 ```go
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    if record.Status == 0 { // Check In
-        sendWelcomeNotification(record.UserID)
-    } else if record.Status == 1 { // Check Out
-        sendGoodbyeNotification(record.UserID)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        if record.Status == 0 { // Check In
+            sendWelcomeNotification(ctx, record.UserID)
+        } else if record.Status == 1 { // Check Out
+            sendGoodbyeNotification(ctx, record.UserID)
+        }
+    }),
+)
+defer server.Close()
 ```
 
 ### 3. Real-time Dashboard
@@ -120,9 +129,15 @@ server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
 ```go
 var attendanceChannel = make(chan zkdevicesync.AttendanceRecord, 100)
 
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    attendanceChannel <- record
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        select {
+        case attendanceChannel <- record:
+        case <-ctx.Done():
+        }
+    }),
+)
+defer server.Close()
 
 // In another goroutine, process for dashboard
 go func() {
@@ -143,33 +158,64 @@ server.SendInfoCommand("DEVICE001")
 The device will respond with its configuration, which you can handle:
 
 ```go
-server.OnDeviceInfo = func(sn string, info map[string]string) {
-    fmt.Printf("Device %s info:\n", sn)
-    for key, value := range info {
-        fmt.Printf("  %s: %s\n", key, value)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+        fmt.Printf("Device %s info:\n", sn)
+        for key, value := range info {
+            fmt.Printf("  %s: %s\n", key, value)
+        }
+    }),
+)
+defer server.Close()
 ```
 
 ### Custom Commands
 
 ```go
-// Restart device
-server.SendCommand("DEVICE001", "CHECK")
+// Queue a command for the device
+server.QueueCommand("DEVICE001", "CHECK")
 
-// Clear admin privileges
-server.SendCommand("DEVICE001", "CLEAR DATA")
+// Drain all pending commands (useful for custom polling logic)
+cmds := server.DrainCommands("DEVICE001")
+```
+
+## Configuring the Server
+
+Use functional options to customize behavior:
+
+```go
+server := zkdevicesync.NewADMSServer(
+    // Use a custom structured logger
+    zkdevicesync.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil))),
+
+    // Limit request body size to 5 MB
+    zkdevicesync.WithMaxBodySize(5 << 20),
+
+    // Consider devices offline after 5 minutes of inactivity
+    zkdevicesync.WithOnlineThreshold(5 * time.Minute),
+
+    // Tie the server to an application-level context
+    zkdevicesync.WithBaseContext(appCtx),
+
+    // Register callbacks
+    zkdevicesync.WithOnAttendance(handleAttendance),
+    zkdevicesync.WithOnDeviceInfo(handleDeviceInfo),
+    zkdevicesync.WithOnRegistry(handleRegistry),
+)
+defer server.Close()
 ```
 
 ## Monitoring Connected Devices
 
-In addition to the simple text endpoint below, the library provides a JSON inspection endpoint you can register:
+The library provides a built-in JSON inspection endpoint:
 
 ```go
 http.HandleFunc("/iclock/inspect", server.HandleInspect)
 ```
 
-This will return a JSON snapshot with devices, lastActivity (RFC3339), online flag, and parsed options (from registry).
+This returns a JSON snapshot with `serial`, `lastActivity` (RFC3339), `online` flag, and parsed `options` (from registry) for each device.
+
+You can also query devices programmatically:
 
 ```go
 http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
@@ -221,16 +267,15 @@ curl -X POST "http://localhost:8080/iclock/registry?SN=TEST001" \
 
 ### No Attendance Records Received
 
-1. **Verify device is registered:**
-   ```bash
-   curl http://localhost:8080/devices
-   ```
+1. **Verify device is registered** — check the `/iclock/inspect` endpoint for device status
 
-2. **Check OnAttendance callback is set:**
+2. **Ensure a callback is set:**
    ```go
-   if server.OnAttendance == nil {
-       log.Fatal("OnAttendance callback not set!")
-   }
+   server := zkdevicesync.NewADMSServer(
+       zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+           log.Printf("Got record: %+v", record)
+       }),
+   )
    ```
 
 3. **Test with simulated data** (see above)
@@ -258,7 +303,7 @@ For issues or questions:
 
 ## Security Considerations
 
-⚠️ **Important for Production:**
+**Important for Production:**
 
 1. **Add authentication** - the basic protocol doesn't include authentication
 2. **Use HTTPS** - set up a reverse proxy with TLS

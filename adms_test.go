@@ -2,7 +2,9 @@ package zkdevicesync
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -13,7 +15,7 @@ import (
 	"time"
 )
 
-func TestNewIClockServer(t *testing.T) {
+func TestNewADMSServer(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	if server == nil {
@@ -1254,5 +1256,356 @@ func TestReadBody_ExceedsLimit_Registry(t *testing.T) {
 
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("expected status %d, got %d", http.StatusRequestEntityTooLarge, w.Code)
+	}
+}
+
+// --- Phase 2: Functional Options API Tests ---
+
+func TestWithOnAttendance_ReceivesContext(t *testing.T) {
+	ctx := t.Context()
+
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithBaseContext(ctx),
+		WithOnAttendance(func(cbCtx context.Context, record AttendanceRecord) {
+			received <- cbCtx
+		}),
+	)
+	defer server.Close()
+
+	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	select {
+	case cbCtx := <-received:
+		// The callback context should be derived from our base context.
+		// It should not be cancelled yet (server still open).
+		if err := cbCtx.Err(); err != nil {
+			t.Errorf("expected non-cancelled context, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for WithOnAttendance callback")
+	}
+}
+
+func TestWithOnAttendance_ContextCancelledAfterClose(t *testing.T) {
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithOnAttendance(func(ctx context.Context, record AttendanceRecord) {
+			received <- ctx
+		}),
+	)
+
+	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	// Get the context from the callback.
+	var cbCtx context.Context
+	select {
+	case cbCtx = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for callback")
+	}
+
+	// Close the server — this should cancel the base context.
+	server.Close()
+
+	if err := cbCtx.Err(); err == nil {
+		t.Error("expected context to be cancelled after Close, but it was not")
+	}
+}
+
+func TestWithOnDeviceInfo_ReceivesContext(t *testing.T) {
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+			received <- ctx
+		}),
+	)
+	defer server.Close()
+
+	body := "DeviceName=ZKDevice\nSerialNumber=TEST001"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	select {
+	case cbCtx := <-received:
+		if err := cbCtx.Err(); err != nil {
+			t.Errorf("expected non-cancelled context, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for WithOnDeviceInfo callback")
+	}
+}
+
+func TestWithOnRegistry_ReceivesContext(t *testing.T) {
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
+			received <- ctx
+		}),
+	)
+	defer server.Close()
+
+	body := "DeviceType=acc"
+	req := httptest.NewRequest("POST", "/iclock/registry?SN=REG_CTX", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	select {
+	case cbCtx := <-received:
+		if err := cbCtx.Err(); err != nil {
+			t.Errorf("expected non-cancelled context, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for WithOnRegistry callback")
+	}
+}
+
+func TestWithLogger(t *testing.T) {
+	// Just verify it doesn't panic and that the logger is used.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server := NewADMSServer(WithLogger(logger))
+	defer server.Close()
+
+	req := httptest.NewRequest("GET", "/iclock/getrequest?SN=LOG001", nil)
+	w := httptest.NewRecorder()
+	server.HandleGetRequest(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Our slog logger should have logged something at debug level.
+	if buf.Len() == 0 {
+		t.Error("expected slog logger to have output, but buffer is empty")
+	}
+}
+
+func TestWithMaxBodySize_Option(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	largeBody := strings.Repeat("x", 20)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=TEST001&table=ATTLOG", strings.NewReader(largeBody))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected status %d, got %d", http.StatusRequestEntityTooLarge, w.Code)
+	}
+}
+
+func TestWithCallbackBufferSize(t *testing.T) {
+	server := NewADMSServer(WithCallbackBufferSize(2))
+	defer server.Close()
+
+	// The channel capacity should be 2.
+	if cap(server.callbackCh) != 2 {
+		t.Errorf("expected callback channel capacity 2, got %d", cap(server.callbackCh))
+	}
+}
+
+func TestWithOnlineThreshold(t *testing.T) {
+	server := NewADMSServer(WithOnlineThreshold(50 * time.Millisecond))
+	defer server.Close()
+
+	server.RegisterDevice("THRESH001")
+	if !server.IsDeviceOnline("THRESH001") {
+		t.Fatal("newly registered device should be online")
+	}
+
+	// Wait for the threshold to expire.
+	time.Sleep(100 * time.Millisecond)
+
+	if server.IsDeviceOnline("THRESH001") {
+		t.Error("device should be offline after threshold expired")
+	}
+}
+
+func TestWithDispatchTimeout(t *testing.T) {
+	// Use a very short dispatch timeout so the test doesn't take long.
+	server := NewADMSServer(WithDispatchTimeout(10 * time.Millisecond))
+	defer server.Close()
+
+	if server.dispatchTimeout != 10*time.Millisecond {
+		t.Errorf("expected dispatchTimeout 10ms, got %v", server.dispatchTimeout)
+	}
+}
+
+func TestWithBaseContext_Cancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	received := make(chan context.Context, 1)
+
+	server := NewADMSServer(
+		WithBaseContext(ctx),
+		WithOnAttendance(func(cbCtx context.Context, record AttendanceRecord) {
+			received <- cbCtx
+		}),
+	)
+	defer server.Close()
+
+	// Cancel the parent context.
+	cancel()
+
+	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	select {
+	case cbCtx := <-received:
+		if err := cbCtx.Err(); err == nil {
+			t.Error("expected context to be cancelled (parent cancelled), but it was not")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for callback")
+	}
+}
+
+func TestDrainCommands(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.QueueCommand("DRAIN001", "CMD1")
+	server.QueueCommand("DRAIN001", "CMD2")
+
+	commands := server.DrainCommands("DRAIN001")
+	if len(commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(commands))
+	}
+	if commands[0] != "CMD1" || commands[1] != "CMD2" {
+		t.Errorf("unexpected commands: %v", commands)
+	}
+
+	// Should be empty now.
+	commands = server.DrainCommands("DRAIN001")
+	if len(commands) != 0 {
+		t.Errorf("expected empty queue after drain, got %d", len(commands))
+	}
+}
+
+func TestDrainCommands_DeletesKey(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.QueueCommand("DRAIN_DEL", "INFO")
+	_ = server.DrainCommands("DRAIN_DEL")
+
+	server.queueMutex.RLock()
+	_, exists := server.commandQueue["DRAIN_DEL"]
+	server.queueMutex.RUnlock()
+
+	if exists {
+		t.Error("expected map key deleted after DrainCommands")
+	}
+}
+
+func TestGetCommands_BackwardCompat(t *testing.T) {
+	// GetCommands should still work (it's deprecated but not removed).
+	server := NewADMSServer()
+	defer server.Close()
+
+	server.QueueCommand("COMPAT001", "INFO")
+	commands := server.GetCommands("COMPAT001")
+	if len(commands) != 1 || commands[0] != "INFO" {
+		t.Errorf("GetCommands backward compat broken: %v", commands)
+	}
+}
+
+func TestFunctionalOption_OverridesDeprecatedField(t *testing.T) {
+	// When both the deprecated field and functional option are set,
+	// the functional option should take precedence.
+	oldReceived := make(chan struct{}, 1)
+	newReceived := make(chan AttendanceRecord, 1)
+
+	server := NewADMSServer(
+		WithOnAttendance(func(ctx context.Context, record AttendanceRecord) {
+			newReceived <- record
+		}),
+	)
+	defer server.Close()
+
+	// Also set the deprecated field — it should NOT be called.
+	server.OnAttendance = func(record AttendanceRecord) {
+		oldReceived <- struct{}{}
+	}
+
+	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
+	req := httptest.NewRequest("POST", "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	select {
+	case rec := <-newReceived:
+		if rec.UserID != "123" {
+			t.Errorf("expected UserID 123, got %s", rec.UserID)
+		}
+	case <-oldReceived:
+		t.Error("deprecated OnAttendance field was called instead of WithOnAttendance")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for callback")
+	}
+}
+
+func TestNewADMSServer_Defaults(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if server.maxBodySize != defaultMaxBodySize {
+		t.Errorf("expected default maxBodySize %d, got %d", defaultMaxBodySize, server.maxBodySize)
+	}
+	if server.onlineThreshold != defaultOnlineThreshold {
+		t.Errorf("expected default onlineThreshold %v, got %v", defaultOnlineThreshold, server.onlineThreshold)
+	}
+	if server.dispatchTimeout != defaultDispatchTimeout {
+		t.Errorf("expected default dispatchTimeout %v, got %v", defaultDispatchTimeout, server.dispatchTimeout)
+	}
+	if cap(server.callbackCh) != defaultCallbackBufferSize {
+		t.Errorf("expected default callbackCh capacity %d, got %d", defaultCallbackBufferSize, cap(server.callbackCh))
+	}
+}
+
+func TestWithLogger_NilIgnored(t *testing.T) {
+	// WithLogger(nil) should leave the default logger in place.
+	server := NewADMSServer(WithLogger(nil))
+	defer server.Close()
+
+	if server.logger != slog.Default() {
+		t.Error("expected default slog logger when WithLogger(nil) is passed")
+	}
+}
+
+func TestWithMaxBodySize_ZeroIgnored(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(0))
+	defer server.Close()
+
+	if server.maxBodySize != defaultMaxBodySize {
+		t.Errorf("expected default maxBodySize, got %d", server.maxBodySize)
+	}
+}
+
+func TestWithCallbackBufferSize_ZeroIgnored(t *testing.T) {
+	server := NewADMSServer(WithCallbackBufferSize(0))
+	defer server.Close()
+
+	if cap(server.callbackCh) != defaultCallbackBufferSize {
+		t.Errorf("expected default buffer size, got %d", cap(server.callbackCh))
+	}
+}
+
+func TestSentinelErrors(t *testing.T) {
+	// Verify sentinel errors exist and have expected messages.
+	if ErrServerClosed.Error() != "zkdevicesync: server closed" {
+		t.Errorf("unexpected ErrServerClosed message: %s", ErrServerClosed.Error())
+	}
+	if ErrCallbackQueueFull.Error() != "zkdevicesync: callback queue full" {
+		t.Errorf("unexpected ErrCallbackQueueFull message: %s", ErrCallbackQueueFull.Error())
 	}
 }

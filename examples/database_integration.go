@@ -1,6 +1,11 @@
+//go:build database_integration
+// +build database_integration
+
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -91,25 +96,47 @@ func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkdevice
 	return result
 }
 
+// attendanceResponse is the JSON structure for attendance API responses.
+type attendanceResponse struct {
+	UserID  string            `json:"user_id,omitempty"`
+	Total   int               `json:"total,omitempty"`
+	Count   int               `json:"count,omitempty"`
+	Records []attendanceEntry `json:"records"`
+}
+
+type attendanceEntry struct {
+	UserID    string `json:"user_id,omitempty"`
+	Timestamp string `json:"timestamp"`
+	Status    int    `json:"status"`
+	Device    string `json:"device"`
+}
+
+// summaryResponse is the JSON structure for the daily summary endpoint.
+type summaryResponse struct {
+	Date    string            `json:"date"`
+	Count   int               `json:"count"`
+	Records []attendanceEntry `json:"records"`
+}
+
 func main() {
 	// Initialize the attendance store
 	store := NewAttendanceStore()
 
-	// Create the ADMS server
-	server := zkdevicesync.NewADMSServer()
+	// Create the ADMS server with functional options
+	server := zkdevicesync.NewADMSServer(
+		// Save attendance records to the store
+		zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+			if err := store.SaveAttendance(record); err != nil {
+				log.Printf("Error saving attendance: %v", err)
+			}
+		}),
+
+		// Log device info updates
+		zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+			log.Printf("Device %s info updated: %v", sn, info)
+		}),
+	)
 	defer server.Close()
-
-	// Set up attendance callback to save to database
-	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-		if err := store.SaveAttendance(record); err != nil {
-			log.Printf("Error saving attendance: %v", err)
-		}
-	}
-
-	// Set up device info callback
-	server.OnDeviceInfo = func(sn string, info map[string]string) {
-		log.Printf("Device %s info updated: %v", sn, info)
-	}
 
 	// Set up HTTP routes
 	http.Handle("/iclock/", server)
@@ -117,36 +144,37 @@ func main() {
 	// API endpoint to query attendance records
 	http.HandleFunc("/api/attendance", func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
-
 		w.Header().Set("Content-Type", "application/json")
 
+		var resp attendanceResponse
 		if userID != "" {
 			records := store.GetRecordsByUser(userID)
-			fmt.Fprintf(w, `{"user_id": "%s", "count": %d, "records": [`, userID, len(records))
-			for i, record := range records {
-				if i > 0 {
-					fmt.Fprint(w, ",")
+			resp.UserID = userID
+			resp.Count = len(records)
+			resp.Records = make([]attendanceEntry, len(records))
+			for i, rec := range records {
+				resp.Records[i] = attendanceEntry{
+					Timestamp: rec.Timestamp.Format(time.RFC3339),
+					Status:    rec.Status,
+					Device:    rec.SerialNumber,
 				}
-				fmt.Fprintf(w, `{"timestamp": "%s", "status": %d, "device": "%s"}`,
-					record.Timestamp.Format(time.RFC3339),
-					record.Status,
-					record.SerialNumber)
 			}
-			fmt.Fprint(w, "]}")
 		} else {
 			records := store.GetRecords()
-			fmt.Fprintf(w, `{"total": %d, "records": [`, len(records))
-			for i, record := range records {
-				if i > 0 {
-					fmt.Fprint(w, ",")
+			resp.Total = len(records)
+			resp.Records = make([]attendanceEntry, len(records))
+			for i, rec := range records {
+				resp.Records[i] = attendanceEntry{
+					UserID:    rec.UserID,
+					Timestamp: rec.Timestamp.Format(time.RFC3339),
+					Status:    rec.Status,
+					Device:    rec.SerialNumber,
 				}
-				fmt.Fprintf(w, `{"user_id": "%s", "timestamp": "%s", "status": %d, "device": "%s"}`,
-					record.UserID,
-					record.Timestamp.Format(time.RFC3339),
-					record.Status,
-					record.SerialNumber)
 			}
-			fmt.Fprint(w, "]}")
+		}
+
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("Error encoding attendance response: %v", err)
 		}
 	})
 
@@ -158,20 +186,23 @@ func main() {
 
 		records := store.GetRecordsByDateRange(startOfDay, endOfDay)
 
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"date": "%s", "count": %d, "records": [`,
-			startOfDay.Format("2006-01-02"), len(records))
-
-		for i, record := range records {
-			if i > 0 {
-				fmt.Fprint(w, ",")
-			}
-			fmt.Fprintf(w, `{"user_id": "%s", "timestamp": "%s", "status": %d}`,
-				record.UserID,
-				record.Timestamp.Format(time.RFC3339),
-				record.Status)
+		resp := summaryResponse{
+			Date:    startOfDay.Format("2006-01-02"),
+			Count:   len(records),
+			Records: make([]attendanceEntry, len(records)),
 		}
-		fmt.Fprint(w, "]}")
+		for i, rec := range records {
+			resp.Records[i] = attendanceEntry{
+				UserID:    rec.UserID,
+				Timestamp: rec.Timestamp.Format(time.RFC3339),
+				Status:    rec.Status,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Printf("Error encoding summary response: %v", err)
+		}
 	})
 
 	addr := ":8080"

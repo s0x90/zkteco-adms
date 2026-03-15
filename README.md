@@ -1,4 +1,4 @@
-# ZK Device Sync
+# ZKTeco Sync
 
 A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendance devices.
 
@@ -6,17 +6,25 @@ A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendan
 
 This library provides a complete implementation of the HTTP-based ADMS protocol used by ZKTeco devices to communicate with servers. It handles device registration, attendance data collection, and remote command execution.
 
+Zero external dependencies — pure Go standard library.
+
 ## Features
 
 - **Full ADMS Protocol Support**: Implements all standard endpoints (`/iclock/cdata`, `/iclock/getrequest`, `/iclock/devicecmd`) plus device registry and inspection endpoints
+- **Functional Options API**: Clean, extensible configuration via `WithX` option functions
+- **Structured Logging**: Uses `log/slog` for structured, leveled logging
+- **Context Support**: Callbacks receive a `context.Context` tied to the server lifecycle
 - **Attendance Data Processing**: Parses and processes attendance logs with multiple timestamp formats
 - **Device Management**: Thread-safe device registration and tracking
 - **Command Queuing**: Queue and send commands to devices remotely
-- **Heartbeat & Online Status**: Tracks last activity per device and exposes online/offline status
-- **Concurrent-Safe**: Built with goroutine-safe data structures
-- **Extensible**: Easy-to-use callbacks for custom business logic
+- **Heartbeat & Online Status**: Tracks last activity per device with configurable online threshold
+- **Concurrent-Safe**: Built with goroutine-safe data structures and async callback dispatch
+- **Request Body Limits**: Configurable `MaxBytesReader` protection against oversized payloads
+- **Graceful Shutdown**: `Close()` drains pending callbacks and cancels the base context
 
 ## Installation
+
+Requires Go 1.26 or higher.
 
 ```bash
 go get github.com/s0x90/zkteco-sync
@@ -28,37 +36,35 @@ go get github.com/s0x90/zkteco-sync
 package main
 
 import (
+    "context"
     "fmt"
     "log"
     "net/http"
-    
+    "time"
+
     zkdevicesync "github.com/s0x90/zkteco-sync"
 )
 
 func main() {
-    // Create a new ADMS server
-    server := zkdevicesync.NewADMSServer()
-    
-    // Set up callback for attendance records
-    server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-        fmt.Printf("User %s checked %s at %s from device %s\n",
-            record.UserID,
-            getStatusString(record.Status),
-            record.Timestamp,
-            record.SerialNumber)
-    }
-    
-    // Set up callback for device information
-    server.OnDeviceInfo = func(sn string, info map[string]string) {
-        fmt.Printf("Device %s connected: %v\n", sn, info)
-    }
-    
-    // Start HTTP server
+    server := zkdevicesync.NewADMSServer(
+        zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+            fmt.Printf("User %s checked %s at %s from device %s\n",
+                record.UserID,
+                statusString(record.Status),
+                record.Timestamp.Format(time.RFC3339),
+                record.SerialNumber)
+        }),
+        zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+            fmt.Printf("Device %s connected: %v\n", sn, info)
+        }),
+    )
+    defer server.Close()
+
     http.Handle("/iclock/", server)
     log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func getStatusString(status int) string {
+func statusString(status int) string {
     switch status {
     case 0:
         return "in"
@@ -75,44 +81,90 @@ func getStatusString(status int) string {
 ### Creating a Server
 
 ```go
+// Defaults: slog.Default() logger, 10 MB body limit, 256 callback buffer,
+// 2-minute online threshold, 1-second dispatch timeout.
 server := zkdevicesync.NewADMSServer()
+defer server.Close()
 ```
+
+### Functional Options
+
+Configure the server at construction time:
+
+```go
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil))),
+    zkdevicesync.WithMaxBodySize(5 << 20),              // 5 MB body limit
+    zkdevicesync.WithCallbackBufferSize(512),            // larger callback buffer
+    zkdevicesync.WithOnlineThreshold(5 * time.Minute),   // 5 min before "offline"
+    zkdevicesync.WithDispatchTimeout(2 * time.Second),   // callback dispatch timeout
+    zkdevicesync.WithBaseContext(ctx),                    // tie to parent context
+    zkdevicesync.WithOnAttendance(handleAttendance),
+    zkdevicesync.WithOnDeviceInfo(handleDeviceInfo),
+    zkdevicesync.WithOnRegistry(handleRegistry),
+)
+defer server.Close()
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithLogger` | `slog.Default()` | Structured logger |
+| `WithMaxBodySize` | 10 MB | Max request body size |
+| `WithCallbackBufferSize` | 256 | Internal callback channel capacity |
+| `WithOnlineThreshold` | 2 min | Duration before a device is considered offline |
+| `WithDispatchTimeout` | 1 sec | Max block time when callback queue is full |
+| `WithBaseContext` | `context.Background()` | Parent context for callbacks |
+| `WithOnAttendance` | nil | Attendance record callback |
+| `WithOnDeviceInfo` | nil | Device info callback |
+| `WithOnRegistry` | nil | Device registry callback |
 
 ### Handling Attendance Records
 
 ```go
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    // Process attendance record
-    // record.UserID - Employee ID
-    // record.Timestamp - Time of attendance
-    // record.Status - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
-    // record.VerifyMode - 0=Password, 1=Fingerprint, 2=Card
-    // record.WorkCode - Optional work code
+zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+    // record.UserID       - Employee ID
+    // record.Timestamp    - Time of attendance
+    // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
+    // record.VerifyMode   - 0=Password, 1=Fingerprint, 2=Card
+    // record.WorkCode     - Optional work code
     // record.SerialNumber - Device serial number
-}
+    //
+    // ctx is cancelled when server.Close() is called.
+})
 ```
 
 ### Handling Device Information
 
 ```go
-server.OnDeviceInfo = func(sn string, info map[string]string) {
-    // Process device information
-    // sn - Device serial number
+zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+    // sn   - Device serial number
     // info - Map of device properties (firmware version, device name, etc.)
-}
+})
+```
+
+### Handling Device Registry
+
+```go
+zkdevicesync.WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
+    // Called when a device registers or re-registers.
+    // info contains parsed key=value pairs from the registry body.
+})
 ```
 
 ### Sending Commands to Devices
 
 ```go
-// Send INFO command
-server.SendInfoCommand("DEVICE001")
+// Queue a custom command
+server.QueueCommand("DEVICE001", "CHECK")
 
-// Send custom command
-server.SendCommand("DEVICE001", "CHECK")
+// Request device information
+server.SendInfoCommand("DEVICE001")
 
 // Send data query command
 server.SendDataCommand("DEVICE001", "USER", "user data")
+
+// Drain all pending commands for a device
+cmds := server.DrainCommands("DEVICE001")
 ```
 
 ### Listing Connected Devices
@@ -120,9 +172,11 @@ server.SendDataCommand("DEVICE001", "USER", "user data")
 ```go
 devices := server.ListDevices()
 for _, device := range devices {
-    fmt.Printf("Device: %s, Last Seen: %s\n", 
-        device.SerialNumber, 
-        device.LastActivity)
+    online := server.IsDeviceOnline(device.SerialNumber)
+    fmt.Printf("Device: %s, Last Seen: %s, Online: %t\n",
+        device.SerialNumber,
+        device.LastActivity.Format(time.RFC3339),
+        online)
 }
 ```
 
@@ -134,14 +188,34 @@ The server implements `http.Handler`, so you can use it directly:
 http.Handle("/iclock/", server)
 ```
 
-Or handle individual endpoints:
+Or register individual endpoints:
 
 ```go
 http.HandleFunc("/iclock/cdata", server.HandleCData)
-http.HandleFunc("/iclock/registry", server.HandleRegistry) // Device registry/capabilities
+http.HandleFunc("/iclock/registry", server.HandleRegistry)
 http.HandleFunc("/iclock/getrequest", server.HandleGetRequest)
 http.HandleFunc("/iclock/devicecmd", server.HandleDeviceCmd)
-http.HandleFunc("/iclock/inspect", server.HandleInspect)   // JSON snapshot of devices
+http.HandleFunc("/iclock/inspect", server.HandleInspect)
+```
+
+### Sentinel Errors
+
+```go
+var (
+    zkdevicesync.ErrServerClosed     // operation attempted on a closed server
+    zkdevicesync.ErrCallbackQueueFull // callback queue full, dispatch timed out
+)
+```
+
+### Graceful Shutdown
+
+```go
+server := zkdevicesync.NewADMSServer(/* ... */)
+// ... use server ...
+
+// Close drains pending callbacks, cancels the base context, and stops the worker.
+// Safe to call multiple times.
+server.Close()
 ```
 
 ## Protocol Details
@@ -155,6 +229,7 @@ http.HandleFunc("/iclock/inspect", server.HandleInspect)   // JSON snapshot of d
 | `/iclock/getrequest` | GET | Device polls for pending commands |
 | `/iclock/devicecmd` | POST | Device reports command execution results |
 | `/iclock/inspect` | GET | Returns JSON summary of devices and their current status |
+
 ### Registry Payload Parsing
 
 Some ZKTeco devices POST a registry body containing comma-separated `key=value` pairs, e.g.:
@@ -168,27 +243,16 @@ Notes:
 - Values are stored into `Device.Options` for subsequent inspection.
 - The handler merges all parsed keys into the registered device.
 
-Callback hook:
-
-```go
-server.OnRegistry = func(sn string, info map[string]string) {
-        // handle registry info (subset of device capabilities/config)
-}
-```
-
 ### Heartbeat and Online Status
 
-The server updates `Device.LastActivity` at each request from the device (`/iclock/cdata`, `/iclock/registry`, `/iclock/getrequest`, `/iclock/devicecmd`) and marks the device online.
+The server updates `Device.LastActivity` at each request from the device and marks the device online.
 
-- A device is considered online if its last activity is within the last 2 minutes.
+- A device is considered online if its last activity is within the online threshold (default: 2 minutes, configurable via `WithOnlineThreshold`).
 - The `/iclock/inspect` endpoint reports for each device:
     - `serial`: device serial number
     - `lastActivity`: RFC3339 timestamp of last activity
     - `online`: boolean derived from last activity
     - `options`: the registry/options map
-
-You can adjust the online threshold in code by changing the 2-minute window.
-
 
 ### Attendance Record Format
 
@@ -200,11 +264,11 @@ UserID\tTimestamp\tStatus\tVerifyMode\tWorkCode
 
 Example:
 ```
-123\t2024-01-01 08:00:00\t0\t1\t0
+123	2024-01-01 08:00:00	0	1	0
 ```
 
 Supported timestamp formats:
-- `2006-01-02 15:04:05` (RFC3339-like)
+- `2006-01-02 15:04:05` (standard datetime)
 - Unix timestamp (seconds since epoch)
 
 ### Status Codes
@@ -249,10 +313,10 @@ Run the test suite:
 go test -v
 ```
 
-Run with coverage:
+Run with race detection and coverage:
 
 ```bash
-go test -v -cover
+go test -v -race -cover
 ```
 
 Run benchmarks:
@@ -265,43 +329,81 @@ go test -bench=.
 
 ### Types
 
+#### `Option`
+A function that configures an `ADMSServer`. Obtained via `WithX` functions.
+
 #### `ADMSServer`
-Main server structure handling all protocol operations.
+Main server structure handling all protocol operations. Implements `http.Handler`.
 
 #### `Device`
-Represents a registered ZKTeco device.
+Represents a registered ZKTeco device with `SerialNumber`, `LastActivity`, and `Options` fields.
 
 #### `AttendanceRecord`
-Represents a single attendance transaction.
+Represents a single attendance transaction with `UserID`, `Timestamp`, `Status`, `VerifyMode`, `WorkCode`, and `SerialNumber` fields.
 
-### Functions
+#### `DeviceSnapshot`
+JSON representation of a device in the `/iclock/inspect` response.
 
-#### `NewADMSServer() *ADMSServer`
-Creates a new ADMS server instance.
+### Constructor
 
-#### `(*ADMSServer) RegisterDevice(serialNumber string)`
-Registers a device with the server.
+#### `NewADMSServer(opts ...Option) *ADMSServer`
+Creates a new ADMS server instance configured with the given options.
 
-#### `(*ADMSServer) GetDevice(serialNumber string) *Device`
-Retrieves device information.
+### Option Functions
 
-#### `(*ADMSServer) QueueCommand(serialNumber, command string)`
-Queues a command for a device.
+| Function | Description |
+|----------|-------------|
+| `WithLogger(*slog.Logger)` | Set structured logger |
+| `WithMaxBodySize(int64)` | Set max request body size |
+| `WithCallbackBufferSize(int)` | Set callback channel capacity |
+| `WithOnlineThreshold(time.Duration)` | Set device online threshold |
+| `WithDispatchTimeout(time.Duration)` | Set callback dispatch timeout |
+| `WithBaseContext(context.Context)` | Set parent context |
+| `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
+| `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
+| `WithOnRegistry(func(context.Context, string, map[string]string))` | Set registry callback |
 
-#### `(*ADMSServer) SendCommand(serialNumber, command string)`
-Alias for QueueCommand.
+### Methods
 
-#### `(*ADMSServer) SendInfoCommand(serialNumber string)`
-Sends an INFO command to request device information.
+| Method | Description |
+|--------|-------------|
+| `Close()` | Drain callbacks and stop the worker goroutine |
+| `RegisterDevice(serialNumber string)` | Register a device |
+| `GetDevice(serialNumber string) *Device` | Get device information (returns a copy) |
+| `IsDeviceOnline(serialNumber string) bool` | Check if a device is online |
+| `QueueCommand(serialNumber, command string)` | Queue a command for a device |
+| `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
+| `SendInfoCommand(serialNumber string)` | Queue an INFO command |
+| `SendDataCommand(serialNumber, table, data string)` | Queue a DATA QUERY command |
+| `ListDevices() []*Device` | List all registered devices (returns copies) |
+| `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
+| `HandleCData(w, r)` | Handle `/iclock/cdata` requests |
+| `HandleRegistry(w, r)` | Handle `/iclock/registry` requests |
+| `HandleGetRequest(w, r)` | Handle `/iclock/getrequest` requests |
+| `HandleDeviceCmd(w, r)` | Handle `/iclock/devicecmd` requests |
+| `HandleInspect(w, r)` | Handle `/iclock/inspect` requests (JSON device snapshot) |
 
-#### `(*ADMSServer) SendDataCommand(serialNumber, table, data string)`
-Sends a DATA QUERY command.
-
-#### `(*ADMSServer) ListDevices() []*Device`
-Returns all registered devices.
+### Standalone Functions
 
 #### `ParseQueryParams(urlStr string) (map[string]string, error)`
-Parses URL query parameters.
+Parses URL query parameters into a map.
+
+### Sentinel Errors
+
+| Error | Description |
+|-------|-------------|
+| `ErrServerClosed` | Returned when an operation is attempted on a closed server |
+| `ErrCallbackQueueFull` | Returned when the callback queue is full and dispatch timed out |
+
+### Deprecated
+
+The following are retained for backward compatibility and will be removed in a future major version:
+
+- `ADMSServer.OnAttendance` field — use `WithOnAttendance` instead
+- `ADMSServer.OnDeviceInfo` field — use `WithOnDeviceInfo` instead
+- `ADMSServer.OnRegistry` field — use `WithOnRegistry` instead
+- `SendCommand()` method — use `QueueCommand` instead
+- `GetCommands()` method — use `DrainCommands` instead
 
 ## Device Configuration
 

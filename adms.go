@@ -6,10 +6,11 @@
 //
 // Basic usage:
 //
-//	server := zkdevicesync.NewADMSServer()
-//	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-//	    fmt.Printf("User %s at %s\n", record.UserID, record.Timestamp)
-//	}
+//	server := zkdevicesync.NewADMSServer(
+//	    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+//	        fmt.Printf("User %s at %s\n", record.UserID, record.Timestamp)
+//	    }),
+//	)
 //	http.Handle("/iclock/", server)
 //	http.ListenAndServe(":8080", nil)
 //
@@ -22,11 +23,12 @@
 package zkdevicesync
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -39,7 +41,119 @@ import (
 const (
 	// defaultMaxBodySize is the default maximum request body size (10 MB).
 	defaultMaxBodySize int64 = 10 << 20
+
+	// defaultCallbackBufferSize is the default capacity of the callback channel.
+	defaultCallbackBufferSize = 256
+
+	// defaultOnlineThreshold is the duration after which a device is
+	// considered offline if no activity has been received.
+	defaultOnlineThreshold = 2 * time.Minute
+
+	// defaultDispatchTimeout is the maximum duration a dispatch will block
+	// when the callback channel is full before dropping the event.
+	defaultDispatchTimeout = 1 * time.Second
 )
+
+// Sentinel errors returned by the server.
+var (
+	// ErrServerClosed is returned when an operation is attempted on a closed server.
+	ErrServerClosed = errors.New("zkdevicesync: server closed")
+
+	// ErrCallbackQueueFull is returned when the callback queue is full and the
+	// dispatch timeout has expired.
+	ErrCallbackQueueFull = errors.New("zkdevicesync: callback queue full")
+)
+
+// Option configures an [ADMSServer]. Use the With* functions to obtain options.
+type Option func(*ADMSServer)
+
+// WithLogger sets the structured logger for the server.
+// If not provided, [slog.Default] is used.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *ADMSServer) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
+// WithMaxBodySize sets the maximum allowed request body size in bytes.
+// If not provided, the default is 10 MB.
+func WithMaxBodySize(n int64) Option {
+	return func(s *ADMSServer) {
+		if n > 0 {
+			s.maxBodySize = n
+		}
+	}
+}
+
+// WithCallbackBufferSize sets the capacity of the internal callback channel.
+// A larger buffer tolerates burstier workloads before applying back-pressure.
+// If not provided, the default is 256.
+func WithCallbackBufferSize(n int) Option {
+	return func(s *ADMSServer) {
+		if n > 0 {
+			s.callbackBufferSize = n
+		}
+	}
+}
+
+// WithOnlineThreshold sets the duration after which a device is considered
+// offline if no activity has been received. If not provided, the default is
+// 2 minutes.
+func WithOnlineThreshold(d time.Duration) Option {
+	return func(s *ADMSServer) {
+		if d > 0 {
+			s.onlineThreshold = d
+		}
+	}
+}
+
+// WithDispatchTimeout sets the maximum duration a callback dispatch will
+// block when the channel is full before dropping the event.
+// If not provided, the default is 1 second.
+func WithDispatchTimeout(d time.Duration) Option {
+	return func(s *ADMSServer) {
+		if d > 0 {
+			s.dispatchTimeout = d
+		}
+	}
+}
+
+// WithOnAttendance registers a callback invoked for each attendance record
+// received from a device. The context is derived from the server's base
+// context and is cancelled when the server is closed.
+func WithOnAttendance(fn func(ctx context.Context, record AttendanceRecord)) Option {
+	return func(s *ADMSServer) {
+		s.onAttendance = fn
+	}
+}
+
+// WithOnDeviceInfo registers a callback invoked when a device posts its
+// info parameters.
+func WithOnDeviceInfo(fn func(ctx context.Context, sn string, info map[string]string)) Option {
+	return func(s *ADMSServer) {
+		s.onDeviceInfo = fn
+	}
+}
+
+// WithOnRegistry registers a callback invoked when a device registers or
+// re-registers with the server.
+func WithOnRegistry(fn func(ctx context.Context, sn string, info map[string]string)) Option {
+	return func(s *ADMSServer) {
+		s.onRegistry = fn
+	}
+}
+
+// WithBaseContext sets the parent context for the server. Callback contexts
+// are derived from this context. If not provided, [context.Background] is used.
+func WithBaseContext(ctx context.Context) Option {
+	return func(s *ADMSServer) {
+		if ctx != nil {
+			s.baseCtx = ctx
+		}
+	}
+}
 
 // Device represents a ZKTeco device
 type Device struct {
@@ -80,6 +194,11 @@ type DeviceSnapshot struct {
 // Callbacks (OnAttendance, OnDeviceInfo, OnRegistry) are dispatched asynchronously
 // via an internal worker goroutine so they never block device HTTP responses.
 // Call Close to drain the callback queue when the server is shutting down.
+//
+// Deprecated: The exported callback fields OnAttendance, OnDeviceInfo, and
+// OnRegistry are retained for backward compatibility but will be removed in a
+// future major version. Use [WithOnAttendance], [WithOnDeviceInfo], and
+// [WithOnRegistry] instead.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
@@ -87,24 +206,34 @@ type ADMSServer struct {
 	queueMutex   sync.RWMutex
 
 	// OnAttendance is called for each attendance record received.
-	// Records from a single HTTP request are dispatched as a batch internally,
-	// but this callback is invoked once per record.
-	// Set this field before passing the server to http.ListenAndServe or
-	// otherwise handling requests; it is read without synchronization from
-	// HTTP handler goroutines.
+	//
+	// Deprecated: Use [WithOnAttendance] instead.
 	OnAttendance func(record AttendanceRecord)
 
 	// OnDeviceInfo is called when a device posts its info parameters.
-	// Set this field before serving; it is read without synchronization.
+	//
+	// Deprecated: Use [WithOnDeviceInfo] instead.
 	OnDeviceInfo func(sn string, info map[string]string)
 
 	// OnRegistry is called when a device registers or re-registers.
-	// Set this field before serving; it is read without synchronization.
+	//
+	// Deprecated: Use [WithOnRegistry] instead.
 	OnRegistry func(sn string, info map[string]string)
 
-	logger *log.Logger
+	// Functional-options callbacks (take context).
+	onAttendance func(ctx context.Context, record AttendanceRecord)
+	onDeviceInfo func(ctx context.Context, sn string, info map[string]string)
+	onRegistry   func(ctx context.Context, sn string, info map[string]string)
 
-	maxBodySize int64 // maximum allowed request body size in bytes
+	logger *slog.Logger
+
+	maxBodySize        int64         // maximum allowed request body size in bytes
+	callbackBufferSize int           // capacity of callbackCh (used at construction)
+	onlineThreshold    time.Duration // duration before device is considered offline
+	dispatchTimeout    time.Duration // max block time for callback dispatch
+
+	baseCtx       context.Context
+	baseCtxCancel context.CancelFunc
 
 	callbackCh   chan func()
 	callbackMu   sync.RWMutex // guards callbackCh close in coordination with dispatchers
@@ -114,19 +243,39 @@ type ADMSServer struct {
 }
 
 // NewADMSServer creates a new ADMS server instance.
-// Set callback fields (OnAttendance, OnDeviceInfo, OnRegistry) before
-// passing the server to http.ListenAndServe. Call Close when the server
-// is no longer needed to drain pending callbacks and stop the worker.
-func NewADMSServer() *ADMSServer {
+//
+// Use [Option] values to configure the server:
+//
+//	server := NewADMSServer(
+//	    WithLogger(slog.Default()),
+//	    WithOnAttendance(func(ctx context.Context, r AttendanceRecord) { ... }),
+//	)
+//
+// Call [ADMSServer.Close] when the server is no longer needed to drain pending
+// callbacks and stop the worker.
+func NewADMSServer(opts ...Option) *ADMSServer {
 	s := &ADMSServer{
-		devices:      make(map[string]*Device),
-		commandQueue: make(map[string][]string),
-		logger:       log.Default(),
-		maxBodySize:  defaultMaxBodySize,
-		callbackCh:   make(chan func(), 256),
-		callbackDone: make(chan struct{}),
-		closeCh:      make(chan struct{}),
+		devices:            make(map[string]*Device),
+		commandQueue:       make(map[string][]string),
+		logger:             slog.Default(),
+		maxBodySize:        defaultMaxBodySize,
+		callbackBufferSize: defaultCallbackBufferSize,
+		onlineThreshold:    defaultOnlineThreshold,
+		dispatchTimeout:    defaultDispatchTimeout,
+		callbackDone:       make(chan struct{}),
+		closeCh:            make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	// Create base context after options have been applied so WithBaseContext
+	// can provide a parent.
+	if s.baseCtx == nil {
+		s.baseCtx = context.Background()
+	}
+	s.baseCtx, s.baseCtxCancel = context.WithCancel(s.baseCtx)
+
+	s.callbackCh = make(chan func(), s.callbackBufferSize)
 	go s.callbackWorker()
 	return s
 }
@@ -136,6 +285,8 @@ func NewADMSServer() *ADMSServer {
 // Close is safe to call multiple times.
 func (s *ADMSServer) Close() {
 	s.closeOnce.Do(func() {
+		// Cancel the base context so callbacks see cancellation.
+		s.baseCtxCancel()
 		// Signal all dispatchers to stop accepting new callbacks.
 		close(s.closeCh)
 		// Wait for any in-flight dispatchCallback calls to finish sending.
@@ -163,7 +314,7 @@ func (s *ADMSServer) callbackWorker() {
 func (s *ADMSServer) safeCall(fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Printf("[Callback] panic recovered: %v", r)
+			s.logger.Error("callback panic recovered", "panic", r)
 		}
 	}()
 	fn()
@@ -177,21 +328,21 @@ func (s *ADMSServer) readBody(w http.ResponseWriter, r *http.Request) ([]byte, e
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			s.logger.Printf("[ADMS Protocol] request body too large (limit %d bytes)", s.maxBodySize)
+			s.logger.Warn("request body too large", "limit", s.maxBodySize)
 			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-			return nil, err
+			return nil, fmt.Errorf("readBody: %w", err)
 		}
-		s.logger.Printf("[ADMS Protocol] failed to read body: %v", err)
+		s.logger.Warn("failed to read body", "error", err)
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
-		return nil, err
+		return nil, fmt.Errorf("readBody: %w", err)
 	}
 	return body, nil
 }
 
 // dispatchCallback enqueues a callback for asynchronous execution.
-// It blocks for up to 1 second if the channel is full before giving up.
-// Returns true if the callback was enqueued, false if the server is closed
-// or the timeout expired.
+// It blocks for up to the configured dispatch timeout if the channel is full
+// before giving up. Returns true if the callback was enqueued, false if the
+// server is closed or the timeout expired.
 func (s *ADMSServer) dispatchCallback(fn func()) bool {
 	s.callbackMu.RLock()
 	defer s.callbackMu.RUnlock()
@@ -210,22 +361,98 @@ func (s *ADMSServer) dispatchCallback(fn func()) bool {
 	default:
 	}
 
-	// Slow-path: channel is full, block up to 1s before giving up.
-	timer := time.NewTimer(1 * time.Second)
+	// Slow-path: channel is full, block up to dispatchTimeout before giving up.
+	timer := time.NewTimer(s.dispatchTimeout)
 	defer timer.Stop()
 
 	select {
 	case s.callbackCh <- fn:
 		return true
 	case <-timer.C:
-		s.logger.Printf("[Callback] WARNING: callback queue full after 1s timeout, dropping event")
+		s.logger.Warn("callback queue full, dropping event",
+			"timeout", s.dispatchTimeout)
 		return false
 	case <-s.closeCh:
 		return false
 	}
 }
 
-// RegisterDevice registers a new device
+// dispatchAttendance dispatches attendance records to the configured callback.
+// It prefers the functional-options callback (onAttendance) over the deprecated
+// struct field (OnAttendance). Returns true if the dispatch was successful or
+// no callback is set, false if the queue is full.
+func (s *ADMSServer) dispatchAttendance(records []AttendanceRecord) bool {
+	if len(records) == 0 {
+		return true
+	}
+
+	cbNew := s.onAttendance
+	cbOld := s.OnAttendance
+	if cbNew == nil && cbOld == nil {
+		return true
+	}
+
+	ctx := s.baseCtx
+	batch := records // capture for closure
+	return s.dispatchCallback(func() {
+		for _, record := range batch {
+			s.safeCall(func() {
+				if cbNew != nil {
+					cbNew(ctx, record)
+				} else {
+					cbOld(record)
+				}
+			})
+		}
+	})
+}
+
+// dispatchDeviceInfo dispatches device info to the configured callback.
+func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool {
+	cbNew := s.onDeviceInfo
+	cbOld := s.OnDeviceInfo
+	if cbNew == nil && cbOld == nil {
+		return true
+	}
+
+	ctx := s.baseCtx
+	return s.dispatchCallback(func() {
+		if cbNew != nil {
+			cbNew(ctx, sn, info)
+		} else {
+			cbOld(sn, info)
+		}
+	})
+}
+
+// dispatchRegistry dispatches registry info to the configured callback.
+func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
+	cbNew := s.onRegistry
+	cbOld := s.OnRegistry
+	if cbNew == nil && cbOld == nil {
+		return true
+	}
+
+	ctx := s.baseCtx
+	return s.dispatchCallback(func() {
+		if cbNew != nil {
+			cbNew(ctx, sn, info)
+		} else {
+			cbOld(sn, info)
+		}
+	})
+}
+
+// bodyPreview returns a truncated preview of body for logging (max 200 bytes).
+func bodyPreview(body []byte) string {
+	preview := string(body)
+	if len(preview) > 200 {
+		return preview[:200] + "..."
+	}
+	return preview
+}
+
+// RegisterDevice registers a new device.
 func (s *ADMSServer) RegisterDevice(serialNumber string) {
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
@@ -251,7 +478,8 @@ func (s *ADMSServer) GetDevice(serialNumber string) *Device {
 	return d.copy()
 }
 
-// IsDeviceOnline reports whether the device has been active within the last 2 minutes.
+// IsDeviceOnline reports whether the device has been active within the
+// configured online threshold (default 2 minutes).
 func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 	s.devicesMutex.RLock()
 	defer s.devicesMutex.RUnlock()
@@ -259,7 +487,7 @@ func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 	return s.isDeviceOnline(d)
 }
 
-// QueueCommand adds a command to be sent to the device
+// QueueCommand adds a command to be sent to the device on its next poll.
 func (s *ADMSServer) QueueCommand(serialNumber, command string) {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
@@ -267,8 +495,9 @@ func (s *ADMSServer) QueueCommand(serialNumber, command string) {
 	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], command)
 }
 
-// GetCommands retrieves pending commands for a device
-func (s *ADMSServer) GetCommands(serialNumber string) []string {
+// DrainCommands retrieves and removes all pending commands for a device.
+// After this call, the device's command queue is empty.
+func (s *ADMSServer) DrainCommands(serialNumber string) []string {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
@@ -277,7 +506,16 @@ func (s *ADMSServer) GetCommands(serialNumber string) []string {
 	return commands
 }
 
-// HandleCData handles the /iclock/cdata endpoint for attendance data
+// GetCommands retrieves and removes pending commands for a device.
+//
+// Deprecated: Use [ADMSServer.DrainCommands] instead. GetCommands is
+// misleadingly named because it mutates (deletes) the command queue as a
+// side effect.
+func (s *ADMSServer) GetCommands(serialNumber string) []string {
+	return s.DrainCommands(serialNumber)
+}
+
+// HandleCData handles the /iclock/cdata endpoint for attendance data.
 func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -296,10 +534,11 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	s.updateDeviceActivity(serialNumber)
 
 	// Logging basic request info
-	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Debug("cdata request",
+		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag", "table"} {
 		if v := query.Get(k); v != "" {
-			s.logger.Printf("[ADMS Protocol]   %s: %s", k, v)
+			s.logger.Debug("cdata param", "key", k, "value", v)
 		}
 	}
 
@@ -316,29 +555,17 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 
 		// Log truncated body size/content
 		if len(body) > 0 {
-			preview := string(body)
-			if len(preview) > 200 {
-				preview = preview[:200] + "..."
-			}
-			s.logger.Printf("[ADMS Protocol]   ATTLOG body (truncated): %s", preview)
+			s.logger.Debug("ATTLOG body", "preview", bodyPreview(body))
 		}
 
 		records := s.parseAttendanceRecords(string(body), serialNumber)
-		if cb := s.OnAttendance; cb != nil && len(records) > 0 {
-			batch := records // capture for closure
-			ok := s.dispatchCallback(func() {
-				for _, record := range batch {
-					s.safeCall(func() { cb(record) })
-				}
-			})
-			if !ok {
-				s.logger.Printf("[ADMS Protocol] FAIL: callback queue full, %d records from device %s not processed",
-					len(records), serialNumber)
-				http.Error(w,
-					fmt.Sprintf("FAIL: callback queue full, %d records not processed", len(records)),
-					http.StatusServiceUnavailable)
-				return
-			}
+		if !s.dispatchAttendance(records) {
+			s.logger.Error("callback queue full, records not processed",
+				"count", len(records), "device", serialNumber)
+			http.Error(w,
+				fmt.Sprintf("FAIL: callback queue full, %d records not processed", len(records)),
+				http.StatusServiceUnavailable)
+			return
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -356,24 +583,18 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
-			if cb := s.OnDeviceInfo; len(body) > 0 && cb != nil {
-				info := s.parseDeviceInfo(string(body))
-				sn := serialNumber
-				if !s.dispatchCallback(func() { cb(sn, info) }) {
-					s.logger.Printf("[ADMS Protocol] WARNING: callback queue full, device info from %s dropped", serialNumber)
-				}
-			}
 			if len(body) > 0 {
-				preview := string(body)
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
+				info := s.parseDeviceInfo(string(body))
+				if !s.dispatchDeviceInfo(serialNumber, info) {
+					s.logger.Warn("callback queue full, device info dropped",
+						"device", serialNumber)
 				}
-				s.logger.Printf("[ADMS Protocol]   INFO body (truncated): %s", preview)
+				s.logger.Debug("INFO body", "preview", bodyPreview(body))
 			}
 		}
 
 		// Check for pending commands
-		commands := s.GetCommands(serialNumber)
+		commands := s.DrainCommands(serialNumber)
 		if len(commands) > 0 {
 			w.WriteHeader(http.StatusOK)
 			for _, cmd := range commands {
@@ -386,7 +607,7 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleGetRequest handles the /iclock/getrequest endpoint
+// HandleGetRequest handles the /iclock/getrequest endpoint.
 func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -402,10 +623,11 @@ func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
 
-	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Debug("getrequest",
+		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 
 	// Check for pending commands
-	commands := s.GetCommands(serialNumber)
+	commands := s.DrainCommands(serialNumber)
 	if len(commands) > 0 {
 		w.WriteHeader(http.StatusOK)
 		for _, cmd := range commands {
@@ -417,7 +639,7 @@ func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleDeviceCmd handles the /iclock/devicecmd endpoint
+// HandleDeviceCmd handles the /iclock/devicecmd endpoint.
 func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -433,7 +655,8 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
 
-	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Debug("devicecmd",
+		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 
 	// Device is reporting command execution result
 	body, err := s.readBody(w, r)
@@ -441,18 +664,14 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) > 0 {
-		preview := string(body)
-		if len(preview) > 200 {
-			preview = preview[:200] + "..."
-		}
-		s.logger.Printf("[ADMS Protocol]   devicecmd body (truncated): %s", preview)
+		s.logger.Debug("devicecmd body", "preview", bodyPreview(body))
 	}
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "OK: Command received: %s", string(body))
 }
 
-// updateDeviceActivity updates the last activity timestamp for a device
+// updateDeviceActivity updates the last activity timestamp for a device.
 func (s *ADMSServer) updateDeviceActivity(serialNumber string) {
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
@@ -461,9 +680,9 @@ func (s *ADMSServer) updateDeviceActivity(serialNumber string) {
 		wasOnline := s.isDeviceOnline(device)
 		device.LastActivity = time.Now()
 		if !wasOnline {
-			s.logger.Printf("[Heartbeat] Device %s marked as online", serialNumber)
+			s.logger.Info("device online", "device", serialNumber)
 		} else {
-			s.logger.Printf("[Heartbeat] Device %s activity", serialNumber)
+			s.logger.Debug("device activity", "device", serialNumber)
 		}
 	}
 }
@@ -472,7 +691,7 @@ func (s *ADMSServer) isDeviceOnline(device *Device) bool {
 	if device == nil {
 		return false
 	}
-	return time.Since(device.LastActivity) <= 2*time.Minute
+	return time.Since(device.LastActivity) <= s.onlineThreshold
 }
 
 // parseAttendanceRecords parses attendance records from the device ATTLOG data.
@@ -490,16 +709,16 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 		parts := strings.Split(line, "\t")
 		if len(parts) < 2 {
 			skipped++
-			s.logger.Printf("[Parse] device %s: skipping malformed ATTLOG line (need >=2 fields, got %d): %q",
-				serialNumber, len(parts), line)
+			s.logger.Warn("skipping malformed ATTLOG line",
+				"device", serialNumber, "fields", len(parts), "line", line)
 			continue
 		}
 
 		userID := strings.TrimSpace(parts[0])
 		if userID == "" {
 			skipped++
-			s.logger.Printf("[Parse] device %s: skipping ATTLOG line with empty UserID: %q",
-				serialNumber, line)
+			s.logger.Warn("skipping ATTLOG line with empty UserID",
+				"device", serialNumber, "line", line)
 			continue
 		}
 
@@ -510,8 +729,8 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			ts = time.Unix(epoch, 0)
 		} else {
 			skipped++
-			s.logger.Printf("[Parse] device %s: skipping ATTLOG line with unparseable timestamp %q: %q",
-				serialNumber, parts[1], line)
+			s.logger.Warn("skipping ATTLOG line with unparseable timestamp",
+				"device", serialNumber, "timestamp", parts[1], "line", line)
 			continue
 		}
 
@@ -524,16 +743,16 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			if v, err := strconv.Atoi(parts[2]); err == nil {
 				record.Status = v
 			} else {
-				s.logger.Printf("[Parse] device %s: non-integer Status field %q, defaulting to 0",
-					serialNumber, parts[2])
+				s.logger.Warn("non-integer Status field, defaulting to 0",
+					"device", serialNumber, "value", parts[2])
 			}
 		}
 		if len(parts) >= 4 {
 			if v, err := strconv.Atoi(parts[3]); err == nil {
 				record.VerifyMode = v
 			} else {
-				s.logger.Printf("[Parse] device %s: non-integer VerifyMode field %q, defaulting to 0",
-					serialNumber, parts[3])
+				s.logger.Warn("non-integer VerifyMode field, defaulting to 0",
+					"device", serialNumber, "value", parts[3])
 			}
 		}
 		if len(parts) >= 5 {
@@ -542,13 +761,13 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 		records = append(records, record)
 	}
 	if skipped > 0 {
-		s.logger.Printf("[Parse] device %s: skipped %d malformed ATTLOG line(s) out of %d total",
-			serialNumber, skipped, len(records)+skipped)
+		s.logger.Warn("skipped malformed ATTLOG lines",
+			"device", serialNumber, "skipped", skipped, "total", len(records)+skipped)
 	}
 	return records
 }
 
-// parseDeviceInfo parses device information from POST data
+// parseDeviceInfo parses device information from POST data.
 func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
 	info := make(map[string]string)
 
@@ -562,7 +781,7 @@ func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
 	return info
 }
 
-// ServeHTTP implements http.Handler interface for convenient routing
+// ServeHTTP implements http.Handler interface for convenient routing.
 func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
@@ -581,27 +800,30 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SendCommand sends a command to a device (to be retrieved on next poll)
+// SendCommand sends a command to a device (to be retrieved on next poll).
+//
+// Deprecated: SendCommand is a trivial alias for [ADMSServer.QueueCommand].
+// Use QueueCommand directly.
 func (s *ADMSServer) SendCommand(serialNumber, command string) {
 	s.QueueCommand(serialNumber, command)
 }
 
-// SendDataCommand formats and sends a DATA command
+// SendDataCommand formats and sends a DATA command.
 func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) {
 	cmd := fmt.Sprintf("DATA QUERY %s\n%s", table, data)
-	s.SendCommand(serialNumber, cmd)
+	s.QueueCommand(serialNumber, cmd)
 }
 
-// SendInfoCommand requests device information
+// SendInfoCommand requests device information.
 func (s *ADMSServer) SendInfoCommand(serialNumber string) {
-	s.SendCommand(serialNumber, "INFO")
+	s.QueueCommand(serialNumber, "INFO")
 }
 
-// ParseQueryParams parses URL query parameters commonly used in iclock protocol
+// ParseQueryParams parses URL query parameters commonly used in iclock protocol.
 func ParseQueryParams(urlStr string) (map[string]string, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse URL: %w", err)
 	}
 
 	params := make(map[string]string)
@@ -630,7 +852,7 @@ func (s *ADMSServer) ListDevices() []*Device {
 
 // --- Additional Handlers & Parsers ---
 
-// HandleRegistry processes /iclock/registry requests for device registration & capabilities
+// HandleRegistry processes /iclock/registry requests for device registration & capabilities.
 func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -645,10 +867,11 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 	s.RegisterDevice(serialNumber)
 	s.updateDeviceActivity(serialNumber)
-	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
+	s.logger.Debug("registry request",
+		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
 	for _, k := range []string{"options", "pushver", "PushOptionsFlag"} {
 		if v := query.Get(k); v != "" {
-			s.logger.Printf("[ADMS Protocol]   %s: %s", k, v)
+			s.logger.Debug("registry param", "key", k, "value", v)
 		}
 	}
 	body, err := s.readBody(w, r)
@@ -656,29 +879,23 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) > 0 {
-		preview := string(body)
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
-		}
-		s.logger.Printf("[ADMS Protocol]   Body (truncated): %s", preview)
+		s.logger.Debug("registry body", "preview", bodyPreview(body))
 		info := s.parseRegistryBody(string(body))
 		s.devicesMutex.Lock()
 		if dev := s.devices[serialNumber]; dev != nil {
 			maps.Copy(dev.Options, info)
 		}
 		s.devicesMutex.Unlock()
-		if cb := s.OnRegistry; cb != nil {
-			sn := serialNumber
-			if !s.dispatchCallback(func() { cb(sn, info) }) {
-				s.logger.Printf("[ADMS Protocol] WARNING: callback queue full, registry info from %s dropped", serialNumber)
-			}
+		if !s.dispatchRegistry(serialNumber, info) {
+			s.logger.Warn("callback queue full, registry info dropped",
+				"device", serialNumber)
 		}
 	}
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "OK")
 }
 
-// HandleInspect serves /iclock/inspect returning JSON device snapshot
+// HandleInspect serves /iclock/inspect returning JSON device snapshot.
 func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -715,7 +932,7 @@ func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("\n"))
 }
 
-// parseRegistryBody parses comma-separated key=value pairs from registry POST body
+// parseRegistryBody parses comma-separated key=value pairs from registry POST body.
 func (s *ADMSServer) parseRegistryBody(data string) map[string]string {
 	info := make(map[string]string)
 	for part := range strings.SplitSeq(data, ",") {

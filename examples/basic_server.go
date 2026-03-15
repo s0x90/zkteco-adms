@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,44 +14,44 @@ import (
 )
 
 func main() {
-	// Create a new ADMS server
-	server := zkdevicesync.NewADMSServer()
-	defer server.Close()
+	// Create a new ADMS server with functional options
+	server := zkdevicesync.NewADMSServer(
+		// Callback for attendance records
+		zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+			fmt.Printf("Attendance Record:\n")
+			fmt.Printf("  Device: %s\n", record.SerialNumber)
+			fmt.Printf("  User ID: %s\n", record.UserID)
+			fmt.Printf("  Timestamp: %s\n", record.Timestamp.Format(time.RFC3339))
+			fmt.Printf("  Status: %d (0=Check In, 1=Check Out)\n", record.Status)
+			fmt.Printf("  Verify Mode: %d (0=Password, 1=Fingerprint, 2=Card)\n", record.VerifyMode)
+			fmt.Printf("  Work Code: %s\n", record.WorkCode)
+			fmt.Println("---")
+		}),
 
-	// Set up callback for attendance records
-	server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-		fmt.Printf("Attendance Record:\n")
-		fmt.Printf("  Device: %s\n", record.SerialNumber)
-		fmt.Printf("  User ID: %s\n", record.UserID)
-		fmt.Printf("  Timestamp: %s\n", record.Timestamp.Format(time.RFC3339))
-		fmt.Printf("  Status: %d (0=Check In, 1=Check Out)\n", record.Status)
-		fmt.Printf("  Verify Mode: %d (0=Password, 1=Fingerprint, 2=Card)\n", record.VerifyMode)
-		fmt.Printf("  Work Code: %s\n", record.WorkCode)
-		fmt.Println("---")
-	}
-
-	// Set up callback for device information
-	server.OnDeviceInfo = func(sn string, info map[string]string) {
-		fmt.Printf("Device Info for %s:\n", sn)
-		for key, value := range info {
-			fmt.Printf("  %s: %s\n", key, value)
-		}
-		fmt.Println("---")
-	}
-
-	// Registry callback (capabilities/config)
-	server.OnRegistry = func(sn string, info map[string]string) {
-		fmt.Printf("Registry Info for %s (partial):\n", sn)
-		shown := 0
-		for k, v := range info {
-			fmt.Printf("  %s: %s\n", k, v)
-			shown++
-			if shown >= 8 { // avoid spamming console
-				break
+		// Callback for device information
+		zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+			fmt.Printf("Device Info for %s:\n", sn)
+			for key, value := range info {
+				fmt.Printf("  %s: %s\n", key, value)
 			}
-		}
-		fmt.Println("---")
-	}
+			fmt.Println("---")
+		}),
+
+		// Callback for device registry/capabilities
+		zkdevicesync.WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
+			fmt.Printf("Registry Info for %s (partial):\n", sn)
+			shown := 0
+			for k, v := range info {
+				fmt.Printf("  %s: %s\n", k, v)
+				shown++
+				if shown >= 8 { // avoid spamming console
+					break
+				}
+			}
+			fmt.Println("---")
+		}),
+	)
+	defer server.Close()
 
 	// Register some known devices (optional)
 	server.RegisterDevice("DEVICE001")
@@ -89,7 +90,7 @@ func main() {
 			return
 		}
 
-		server.SendCommand(sn, cmd)
+		server.QueueCommand(sn, cmd)
 		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
 	})
 
