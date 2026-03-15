@@ -4,14 +4,14 @@ This guide will help you get started with the ZK Device Sync library for integra
 
 ## Prerequisites
 
-- Go 1.24 or higher
+- Go 1.26 or higher
 - A ZKTeco biometric device (attendance machine)
 - Network access between your server and the device
 
 ## Installation
 
 ```bash
-go get github.com/s0x90/zk-device-sync
+go get github.com/s0x90/zkteco-sync
 ```
 
 ## Your First Server
@@ -26,7 +26,7 @@ import (
     "log"
     "net/http"
     
-    zkdevicesync "github.com/s0x90/zk-device-sync"
+    zkdevicesync "github.com/s0x90/zkteco-sync"
 )
 
 func main() {

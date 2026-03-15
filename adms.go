@@ -35,6 +35,11 @@ import (
 	"time"
 )
 
+const (
+	// defaultMaxBodySize is the default maximum request body size (10 MB).
+	defaultMaxBodySize int64 = 10 << 20
+)
+
 // Device represents a ZKTeco device
 type Device struct {
 	SerialNumber string
@@ -98,6 +103,8 @@ type ADMSServer struct {
 
 	logger *log.Logger
 
+	maxBodySize int64 // maximum allowed request body size in bytes
+
 	callbackCh   chan func()
 	callbackMu   sync.RWMutex // guards callbackCh close in coordination with dispatchers
 	callbackDone chan struct{}
@@ -105,7 +112,7 @@ type ADMSServer struct {
 	closeOnce    sync.Once
 }
 
-// NewADMSServer creates a new  server instance.
+// NewADMSServer creates a new ADMS server instance.
 // Set callback fields (OnAttendance, OnDeviceInfo, OnRegistry) before
 // passing the server to http.ListenAndServe. Call Close when the server
 // is no longer needed to drain pending callbacks and stop the worker.
@@ -114,6 +121,7 @@ func NewADMSServer() *ADMSServer {
 		devices:      make(map[string]*Device),
 		commandQueue: make(map[string][]string),
 		logger:       log.Default(),
+		maxBodySize:  defaultMaxBodySize,
 		callbackCh:   make(chan func(), 256),
 		callbackDone: make(chan struct{}),
 		closeCh:      make(chan struct{}),
@@ -158,6 +166,19 @@ func (s *ADMSServer) safeCall(fn func()) {
 		}
 	}()
 	fn()
+}
+
+// readBody reads the request body with a size limit enforced by http.MaxBytesReader.
+// It returns the body bytes or writes an HTTP error and returns a non-nil error.
+func (s *ADMSServer) readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.logger.Printf("[ADMS Protocol] failed to read body: %v", err)
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return nil, err
+	}
+	return body, nil
 }
 
 // dispatchCallback enqueues a callback for asynchronous execution.
@@ -281,9 +302,8 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	switch table {
 	case "ATTLOG":
 		// Parse attendance log data
-		body, err := io.ReadAll(r.Body)
+		body, err := s.readBody(w, r)
 		if err != nil {
-			http.Error(w, "Failed to read body", http.StatusBadRequest)
 			return
 		}
 
@@ -325,9 +345,8 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 	default:
 		// Handle INFO or other requests
 		if r.Method == http.MethodPost {
-			body, err := io.ReadAll(r.Body)
+			body, err := s.readBody(w, r)
 			if err != nil {
-				http.Error(w, "Failed to read body", http.StatusBadRequest)
 				return
 			}
 			if cb := s.OnDeviceInfo; len(body) > 0 && cb != nil {
@@ -410,9 +429,8 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	s.logger.Printf("[ADMS Protocol] %s %s - Device: %s", r.Method, r.URL.Path, serialNumber)
 
 	// Device is reporting command execution result
-	body, err := io.ReadAll(r.Body)
+	body, err := s.readBody(w, r)
 	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
 	if len(body) > 0 {
@@ -626,9 +644,8 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 			s.logger.Printf("[ADMS Protocol]   %s: %s", k, v)
 		}
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := s.readBody(w, r)
 	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
 	if len(body) > 0 {
@@ -681,11 +698,14 @@ func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	snapshot.Count = len(snapshot.Devices)
 	s.devicesMutex.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(snapshot); err != nil {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+	w.Write([]byte("\n"))
 }
 
 // parseRegistryBody parses comma-separated key=value pairs from registry POST body

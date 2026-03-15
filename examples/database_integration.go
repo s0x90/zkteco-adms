@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	zkdevicesync "github.com/s0x90/zk-device-sync"
+	zkdevicesync "github.com/s0x90/zkteco-sync"
 	// Uncomment when using actual database
 	// _ "github.com/lib/pq"
 )

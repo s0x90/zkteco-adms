@@ -19,7 +19,7 @@ This library provides a complete implementation of the HTTP-based ADMS protocol 
 ## Installation
 
 ```bash
-go get github.com/s0x90/zk-device-sync
+go get github.com/s0x90/zkteco-sync
 ```
 
 ## Quick Start
@@ -32,7 +32,7 @@ import (
     "log"
     "net/http"
     
-    zkdevicesync "github.com/s0x90/zk-device-sync"
+    zkdevicesync "github.com/s0x90/zkteco-sync"
 )
 
 func main() {
