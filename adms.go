@@ -56,6 +56,49 @@ const (
 
 	// maxSerialNumberLength is the maximum allowed length for a device serial number.
 	maxSerialNumberLength = 64
+
+	// maxBodyPreviewLen is the maximum number of bytes shown in body log previews.
+	maxBodyPreviewLen = 200
+
+	// Route path suffixes for the ADMS protocol endpoints.
+	routeCData      = "/iclock/cdata"
+	routeGetRequest = "/iclock/getrequest"
+	routeDeviceCmd  = "/iclock/devicecmd"
+	routeRegistry   = "/iclock/registry"
+	routeInspect    = "/iclock/inspect"
+
+	// Table names sent by devices in the "table" query parameter.
+	tableATTLOG  = "ATTLOG"
+	tableOPERLOG = "OPERLOG"
+
+	// timestampFormat is the date/time layout used by ZKTeco devices.
+	timestampFormat = "2006-01-02 15:04:05"
+
+	// ATTLOG tab-separated field indices.
+	attFieldUserID     = 0
+	attFieldTimestamp  = 1
+	attFieldStatus     = 2
+	attFieldVerifyMode = 3
+	attFieldWorkCode   = 4
+	// attMinFields is the minimum number of tab-separated fields for a valid ATTLOG line.
+	attMinFields = 2
+
+	// Query parameter names used by the iclock protocol.
+	paramSN              = "SN"
+	paramTable           = "table"
+	paramOptions         = "options"
+	paramPushVer         = "pushver"
+	paramPushOptionsFlag = "PushOptionsFlag"
+
+	// Common HTTP response strings.
+	respOK               = "OK"
+	respMethodNotAllowed = "Method not allowed"
+	respMissingSN        = "Missing SN parameter"
+	respInvalidSN        = "Invalid SN parameter"
+	respDeviceLimitMsg   = "Device limit reached"
+
+	// cmdFormat is the format string for writing pending commands.
+	cmdFormat = "C:%s\n"
 )
 
 // Sentinel errors returned by the server.
@@ -401,6 +444,61 @@ func (s *ADMSServer) readBody(w http.ResponseWriter, r *http.Request) ([]byte, e
 	return body, nil
 }
 
+// requireMethod checks that the request method is one of the allowed methods.
+// On failure it writes a 405 response and returns false.
+func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
+	for _, m := range methods {
+		if r.Method == m {
+			return true
+		}
+	}
+	http.Error(w, respMethodNotAllowed, http.StatusMethodNotAllowed)
+	return false
+}
+
+// requireDevice validates the SN parameter, registers the device, and updates
+// its activity timestamp. On failure it writes an HTTP error and returns ("", false).
+func (s *ADMSServer) requireDevice(w http.ResponseWriter, r *http.Request) (string, bool) {
+	sn, ok := s.requireSerialNumber(w, r)
+	if !ok {
+		return "", false
+	}
+	if !s.registerOrReject(w, sn) {
+		return "", false
+	}
+	s.updateDeviceActivity(sn)
+	return sn, true
+}
+
+// writeCommandsOrOK drains pending commands for a device and writes them as
+// "C:<cmd>\n" lines. If no commands are pending, it writes "OK".
+func (s *ADMSServer) writeCommandsOrOK(w http.ResponseWriter, serialNumber string) {
+	commands := s.DrainCommands(serialNumber)
+	w.WriteHeader(http.StatusOK)
+	if len(commands) > 0 {
+		for _, cmd := range commands {
+			fmt.Fprintf(w, cmdFormat, cmd)
+		}
+	} else {
+		fmt.Fprint(w, respOK)
+	}
+}
+
+// logRequest emits a debug log line with standard request metadata.
+func (s *ADMSServer) logRequest(label string, r *http.Request, serialNumber string) {
+	s.logger.Debug(label,
+		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
+}
+
+// logQueryParams logs the values of common iclock query parameters that are present.
+func (s *ADMSServer) logQueryParams(label string, query url.Values, keys ...string) {
+	for _, k := range keys {
+		if v := query.Get(k); v != "" {
+			s.logger.Debug(label, "key", k, "value", v)
+		}
+	}
+}
+
 // dispatchCallback enqueues a callback for asynchronous execution.
 // It blocks for up to the configured dispatch timeout if the channel is full
 // before giving up. Returns true if the callback was enqueued, false if the
@@ -469,14 +567,17 @@ func (s *ADMSServer) dispatchAttendance(records []AttendanceRecord) bool {
 	})
 }
 
-// dispatchDeviceInfo dispatches device info to the configured callback.
-func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool {
-	cbNew := s.onDeviceInfo
-	cbOld := s.OnDeviceInfo
+// dispatchMapCallback dispatches a map-based callback (device info or registry)
+// to the appropriate new-style or deprecated callback function.
+func (s *ADMSServer) dispatchMapCallback(
+	sn string,
+	info map[string]string,
+	cbNew func(ctx context.Context, sn string, info map[string]string),
+	cbOld func(sn string, info map[string]string),
+) bool {
 	if cbNew == nil && cbOld == nil {
 		return true
 	}
-
 	ctx := s.baseCtx
 	return s.dispatchCallback(func() {
 		if cbNew != nil {
@@ -485,30 +586,22 @@ func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool 
 			cbOld(sn, info)
 		}
 	})
+}
+
+// dispatchDeviceInfo dispatches device info to the configured callback.
+func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool {
+	return s.dispatchMapCallback(sn, info, s.onDeviceInfo, s.OnDeviceInfo)
 }
 
 // dispatchRegistry dispatches registry info to the configured callback.
 func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
-	cbNew := s.onRegistry
-	cbOld := s.OnRegistry
-	if cbNew == nil && cbOld == nil {
-		return true
-	}
-
-	ctx := s.baseCtx
-	return s.dispatchCallback(func() {
-		if cbNew != nil {
-			cbNew(ctx, sn, info)
-		} else {
-			cbOld(sn, info)
-		}
-	})
+	return s.dispatchMapCallback(sn, info, s.onRegistry, s.OnRegistry)
 }
 
-// bodyPreview returns a truncated preview of body for logging (max 200 bytes).
+// bodyPreview returns a truncated preview of body for logging (max maxBodyPreviewLen bytes).
 func bodyPreview(body []byte) string {
-	if len(body) > 200 {
-		return string(body[:200]) + "..."
+	if len(body) > maxBodyPreviewLen {
+		return string(body[:maxBodyPreviewLen]) + "..."
 	}
 	return string(body)
 }
@@ -531,14 +624,14 @@ func validateSerialNumber(sn string) error {
 // requireSerialNumber extracts and validates the SN query parameter.
 // On failure it writes an HTTP error response and returns ("", false).
 func (s *ADMSServer) requireSerialNumber(w http.ResponseWriter, r *http.Request) (string, bool) {
-	sn := r.URL.Query().Get("SN")
+	sn := r.URL.Query().Get(paramSN)
 	if sn == "" {
-		http.Error(w, "Missing SN parameter", http.StatusBadRequest)
+		http.Error(w, respMissingSN, http.StatusBadRequest)
 		return "", false
 	}
 	if err := validateSerialNumber(sn); err != nil {
 		s.logger.Warn("invalid serial number", "sn", sn, "error", err)
-		http.Error(w, "Invalid SN parameter", http.StatusBadRequest)
+		http.Error(w, respInvalidSN, http.StatusBadRequest)
 		return "", false
 	}
 	return sn, true
@@ -551,11 +644,11 @@ func (s *ADMSServer) registerOrReject(w http.ResponseWriter, serialNumber string
 		if errors.Is(err, ErrMaxDevicesReached) {
 			s.logger.Warn("device limit reached, rejecting registration",
 				"device", serialNumber, "limit", s.maxDevices)
-			http.Error(w, "Device limit reached", http.StatusServiceUnavailable)
+			http.Error(w, respDeviceLimitMsg, http.StatusServiceUnavailable)
 		} else {
 			s.logger.Warn("device registration failed",
 				"device", serialNumber, "error", err)
-			http.Error(w, "Invalid SN parameter", http.StatusBadRequest)
+			http.Error(w, respInvalidSN, http.StatusBadRequest)
 		}
 		return false
 	}
@@ -644,37 +737,24 @@ func (s *ADMSServer) GetCommands(serialNumber string) []string {
 
 // HandleCData handles the /iclock/cdata endpoint for attendance data.
 func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet, http.MethodPost) {
 		return
 	}
 
-	serialNumber, ok := s.requireSerialNumber(w, r)
+	serialNumber, ok := s.requireDevice(w, r)
 	if !ok {
 		return
 	}
 
-	// Register/update device
-	if !s.registerOrReject(w, serialNumber) {
-		return
-	}
-	s.updateDeviceActivity(serialNumber)
-
-	// Logging basic request info
 	query := r.URL.Query()
-	s.logger.Debug("cdata request",
-		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
-	for _, k := range []string{"options", "pushver", "PushOptionsFlag", "table"} {
-		if v := query.Get(k); v != "" {
-			s.logger.Debug("cdata param", "key", k, "value", v)
-		}
-	}
+	s.logRequest("cdata request", r, serialNumber)
+	s.logQueryParams("cdata param", query, paramOptions, paramPushVer, paramPushOptionsFlag, paramTable)
 
 	// Handle different table types
-	table := query.Get("table")
+	table := query.Get(paramTable)
 
 	switch table {
-	case "ATTLOG":
+	case tableATTLOG:
 		// Parse attendance log data
 		body, err := s.readBody(w, r)
 		if err != nil {
@@ -699,10 +779,10 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK: %d", len(records))
 
-	case "OPERLOG":
+	case tableOPERLOG:
 		// Operation log - acknowledge
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "OK")
+		fmt.Fprint(w, respOK)
 
 	default:
 		// Handle INFO or other requests
@@ -712,7 +792,7 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(body) > 0 {
-				info := s.parseDeviceInfo(string(body))
+				info := s.parseKVPairs(string(body), "\n", nil)
 				if !s.dispatchDeviceInfo(serialNumber, info) {
 					s.logger.Warn("callback queue full, device info dropped",
 						"device", serialNumber)
@@ -722,71 +802,38 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Check for pending commands
-		commands := s.DrainCommands(serialNumber)
-		if len(commands) > 0 {
-			w.WriteHeader(http.StatusOK)
-			for _, cmd := range commands {
-				fmt.Fprintf(w, "C:%s\n", cmd)
-			}
-		} else {
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, "OK")
-		}
+		s.writeCommandsOrOK(w, serialNumber)
 	}
 }
 
 // HandleGetRequest handles the /iclock/getrequest endpoint.
 func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
-	serialNumber, ok := s.requireSerialNumber(w, r)
+	serialNumber, ok := s.requireDevice(w, r)
 	if !ok {
 		return
 	}
 
-	if !s.registerOrReject(w, serialNumber) {
-		return
-	}
-	s.updateDeviceActivity(serialNumber)
+	s.logRequest("getrequest", r, serialNumber)
 
-	s.logger.Debug("getrequest",
-		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
-
-	// Check for pending commands
-	commands := s.DrainCommands(serialNumber)
-	if len(commands) > 0 {
-		w.WriteHeader(http.StatusOK)
-		for _, cmd := range commands {
-			fmt.Fprintf(w, "C:%s\n", cmd)
-		}
-	} else {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "OK")
-	}
+	s.writeCommandsOrOK(w, serialNumber)
 }
 
 // HandleDeviceCmd handles the /iclock/devicecmd endpoint.
 func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
-	serialNumber, ok := s.requireSerialNumber(w, r)
+	serialNumber, ok := s.requireDevice(w, r)
 	if !ok {
 		return
 	}
 
-	if !s.registerOrReject(w, serialNumber) {
-		return
-	}
-	s.updateDeviceActivity(serialNumber)
-
-	s.logger.Debug("devicecmd",
-		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
+	s.logRequest("devicecmd", r, serialNumber)
 
 	// Device is reporting command execution result
 	body, err := s.readBody(w, r)
@@ -837,14 +884,14 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
+		if len(parts) < attMinFields {
 			skipped++
 			s.logger.Warn("skipping malformed ATTLOG line",
 				"device", serialNumber, "fields", len(parts), "line", line)
 			continue
 		}
 
-		userID := strings.TrimSpace(parts[0])
+		userID := strings.TrimSpace(parts[attFieldUserID])
 		if userID == "" {
 			skipped++
 			s.logger.Warn("skipping ATTLOG line with empty UserID",
@@ -853,14 +900,14 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 		}
 
 		var ts time.Time
-		if parsed, err := time.Parse("2006-01-02 15:04:05", parts[1]); err == nil {
+		if parsed, err := time.Parse(timestampFormat, parts[attFieldTimestamp]); err == nil {
 			ts = parsed
-		} else if epoch, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+		} else if epoch, err := strconv.ParseInt(parts[attFieldTimestamp], 10, 64); err == nil {
 			ts = time.Unix(epoch, 0)
 		} else {
 			skipped++
 			s.logger.Warn("skipping ATTLOG line with unparseable timestamp",
-				"device", serialNumber, "timestamp", parts[1], "line", line)
+				"device", serialNumber, "timestamp", parts[attFieldTimestamp], "line", line)
 			continue
 		}
 
@@ -869,24 +916,24 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			UserID:       userID,
 			Timestamp:    ts,
 		}
-		if len(parts) >= 3 {
-			if v, err := strconv.Atoi(parts[2]); err == nil {
+		if len(parts) > attFieldStatus {
+			if v, err := strconv.Atoi(parts[attFieldStatus]); err == nil {
 				record.Status = v
 			} else {
 				s.logger.Warn("non-integer Status field, defaulting to 0",
-					"device", serialNumber, "value", parts[2])
+					"device", serialNumber, "value", parts[attFieldStatus])
 			}
 		}
-		if len(parts) >= 4 {
-			if v, err := strconv.Atoi(parts[3]); err == nil {
+		if len(parts) > attFieldVerifyMode {
+			if v, err := strconv.Atoi(parts[attFieldVerifyMode]); err == nil {
 				record.VerifyMode = v
 			} else {
 				s.logger.Warn("non-integer VerifyMode field, defaulting to 0",
-					"device", serialNumber, "value", parts[3])
+					"device", serialNumber, "value", parts[attFieldVerifyMode])
 			}
 		}
-		if len(parts) >= 5 {
-			record.WorkCode = parts[4]
+		if len(parts) > attFieldWorkCode {
+			record.WorkCode = parts[attFieldWorkCode]
 		}
 		records = append(records, record)
 	}
@@ -897,33 +944,58 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 	return records
 }
 
-// parseDeviceInfo parses device information from POST data.
-func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
-	info := make(map[string]string)
+// trimTildePrefix removes a leading "~" from s.
+func trimTildePrefix(s string) string {
+	return strings.TrimPrefix(s, "~")
+}
 
-	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
-		line = strings.TrimSpace(line)
-		if key, value, ok := strings.Cut(line, "="); ok {
-			info[strings.TrimSpace(key)] = strings.TrimSpace(value)
+// parseKVPairs parses key=value pairs separated by sep. Each pair is split on
+// "=". If transformKey is non-nil it is applied to each key before insertion.
+// This generalises the two device parsers:
+//   - Device info: sep="\n", transformKey=nil
+//   - Registry:    sep=",",  transformKey=trimTildePrefix
+func (s *ADMSServer) parseKVPairs(data, sep string, transformKey func(string) string) map[string]string {
+	info := make(map[string]string)
+	for part := range strings.SplitSeq(strings.TrimSpace(data), sep) {
+		part = strings.TrimSpace(part)
+		if key, value, ok := strings.Cut(part, "="); ok {
+			k := strings.TrimSpace(key)
+			if transformKey != nil {
+				k = transformKey(k)
+			}
+			info[k] = strings.TrimSpace(value)
 		}
 	}
-
 	return info
+}
+
+// parseDeviceInfo parses device information from POST data.
+//
+// Deprecated: Kept for backward compatibility; delegates to parseKVPairs.
+func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
+	return s.parseKVPairs(data, "\n", nil)
+}
+
+// parseRegistryBody parses comma-separated key=value pairs from registry POST body.
+//
+// Deprecated: Kept for backward compatibility; delegates to parseKVPairs.
+func (s *ADMSServer) parseRegistryBody(data string) map[string]string {
+	return s.parseKVPairs(data, ",", trimTildePrefix)
 }
 
 // ServeHTTP implements http.Handler interface for convenient routing.
 func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
-	case strings.HasSuffix(path, "/iclock/cdata"):
+	case strings.HasSuffix(path, routeCData):
 		s.HandleCData(w, r)
-	case strings.HasSuffix(path, "/iclock/getrequest"):
+	case strings.HasSuffix(path, routeGetRequest):
 		s.HandleGetRequest(w, r)
-	case strings.HasSuffix(path, "/iclock/devicecmd"):
+	case strings.HasSuffix(path, routeDeviceCmd):
 		s.HandleDeviceCmd(w, r)
-	case strings.HasSuffix(path, "/iclock/registry"):
+	case strings.HasSuffix(path, routeRegistry):
 		s.HandleRegistry(w, r)
-	case strings.HasSuffix(path, "/iclock/inspect"):
+	case strings.HasSuffix(path, routeInspect):
 		if !s.enableInspect {
 			http.NotFound(w, r)
 			return
@@ -990,34 +1062,26 @@ func (s *ADMSServer) ListDevices() []*Device {
 
 // HandleRegistry processes /iclock/registry requests for device registration & capabilities.
 func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet, http.MethodPost) {
 		return
 	}
 
-	serialNumber, ok := s.requireSerialNumber(w, r)
+	serialNumber, ok := s.requireDevice(w, r)
 	if !ok {
 		return
 	}
-	if !s.registerOrReject(w, serialNumber) {
-		return
-	}
-	s.updateDeviceActivity(serialNumber)
+
 	query := r.URL.Query()
-	s.logger.Debug("registry request",
-		"method", r.Method, "path", r.URL.Path, "device", serialNumber)
-	for _, k := range []string{"options", "pushver", "PushOptionsFlag"} {
-		if v := query.Get(k); v != "" {
-			s.logger.Debug("registry param", "key", k, "value", v)
-		}
-	}
+	s.logRequest("registry request", r, serialNumber)
+	s.logQueryParams("registry param", query, paramOptions, paramPushVer, paramPushOptionsFlag)
+
 	body, err := s.readBody(w, r)
 	if err != nil {
 		return
 	}
 	if len(body) > 0 {
 		s.logger.Debug("registry body", "preview", bodyPreview(body))
-		info := s.parseRegistryBody(string(body))
+		info := s.parseKVPairs(string(body), ",", trimTildePrefix)
 		s.devicesMutex.Lock()
 		if dev := s.devices[serialNumber]; dev != nil {
 			maps.Copy(dev.Options, info)
@@ -1029,13 +1093,12 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
+	fmt.Fprint(w, respOK)
 }
 
 // HandleInspect serves /iclock/inspect returning JSON device snapshot.
 func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
@@ -1072,16 +1135,4 @@ func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 	if _, err = w.Write([]byte("\n")); err != nil {
 		s.logger.Warn("failed to write inspect trailing newline", "error", err)
 	}
-}
-
-// parseRegistryBody parses comma-separated key=value pairs from registry POST body.
-func (s *ADMSServer) parseRegistryBody(data string) map[string]string {
-	info := make(map[string]string)
-	for part := range strings.SplitSeq(data, ",") {
-		part = strings.TrimSpace(part)
-		if key, value, ok := strings.Cut(part, "="); ok {
-			info[strings.TrimPrefix(strings.TrimSpace(key), "~")] = strings.TrimSpace(value)
-		}
-	}
-	return info
 }
