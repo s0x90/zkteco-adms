@@ -153,8 +153,8 @@ http.HandleFunc("/iclock/inspect", server.HandleInspect)   // JSON snapshot of d
 | `/iclock/cdata` | GET/POST | Receives attendance logs (ATTLOG) and operation logs (OPERLOG). Also accepts device info POSTs |
 | `/iclock/registry` | GET/POST | Device registration and capability payloads (key=value comma-separated) |
 | `/iclock/getrequest` | GET | Device polls for pending commands |
-| `/ADMS devicecmd` | POST | Device reports command execution results |
-| `/iclock/insADMS| GET | Returns JSON summary of devices and their current status |
+| `/iclock/devicecmd` | POST | Device reports command execution results |
+| `/iclock/inspect` | GET | Returns JSON summary of devices and their current status |
 ### Registry Payload Parsing
 
 Some ZKTeco devices POST a registry body containing comma-separated `key=value` pairs, e.g.:
