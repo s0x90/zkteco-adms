@@ -1,17 +1,17 @@
-# Getting Started with ZK Device Sync
+# Getting Started with ZKTeco Sync
 
-This guide will help you get started with the ZK Device Sync library for integrating ZKTeco biometric devices with your Go applications.
+This guide will help you get started with the ZKTeco Sync library for integrating ZKTeco biometric devices with your Go applications.
 
 ## Prerequisites
 
-- Go 1.24 or higher
+- Go 1.26 or higher
 - A ZKTeco biometric device (attendance machine)
 - Network access between your server and the device
 
 ## Installation
 
 ```bash
-go get github.com/s0x90/zk-device-sync
+go get github.com/s0x90/zkteco-sync
 ```
 
 ## Your First Server
@@ -22,24 +22,25 @@ Create a file `main.go`:
 package main
 
 import (
+    "context"
     "fmt"
     "log"
     "net/http"
-    
-    zkdevicesync "github.com/s0x90/zk-device-sync"
+
+    zkdevicesync "github.com/s0x90/zkteco-sync"
 )
 
 func main() {
-    // Create the server
-    server := zkdevicesync.NewADMSServer()
-    
-    // Handle attendance records
-    server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-        fmt.Printf("Attendance: User %s at %s\n", 
-            record.UserID, 
-            record.Timestamp)
-    }
-    
+    // Create the server with a callback for attendance records
+    server := zkdevicesync.NewADMSServer(
+        zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+            fmt.Printf("Attendance: User %s at %s\n",
+                record.UserID,
+                record.Timestamp)
+        }),
+    )
+    defer server.Close()
+
     // Start the HTTP server
     http.Handle("/iclock/", server)
     log.Println("Server running on :8080")
@@ -89,30 +90,38 @@ type AttendanceRecord struct {
 ### 1. Save to Database
 
 ```go
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    query := `INSERT INTO attendance (user_id, timestamp, status, device) 
-              VALUES (?, ?, ?, ?)`
-    _, err := db.Exec(query, 
-        record.UserID, 
-        record.Timestamp, 
-        record.Status,
-        record.SerialNumber)
-    if err != nil {
-        log.Printf("Error saving: %v", err)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        query := `INSERT INTO attendance (user_id, timestamp, status, device)
+                  VALUES (?, ?, ?, ?)`
+        _, err := db.ExecContext(ctx, query,
+            record.UserID,
+            record.Timestamp,
+            record.Status,
+            record.SerialNumber)
+        if err != nil {
+            log.Printf("Error saving: %v", err)
+        }
+    }),
+)
+defer server.Close()
 ```
+
+Note: the `ctx` passed to your callback is derived from the server's base context and will be cancelled when `server.Close()` is called, which makes it ideal for database calls.
 
 ### 2. Send Notifications
 
 ```go
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    if record.Status == 0 { // Check In
-        sendWelcomeNotification(record.UserID)
-    } else if record.Status == 1 { // Check Out
-        sendGoodbyeNotification(record.UserID)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        if record.Status == 0 { // Check In
+            sendWelcomeNotification(ctx, record.UserID)
+        } else if record.Status == 1 { // Check Out
+            sendGoodbyeNotification(ctx, record.UserID)
+        }
+    }),
+)
+defer server.Close()
 ```
 
 ### 3. Real-time Dashboard
@@ -120,9 +129,15 @@ server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
 ```go
 var attendanceChannel = make(chan zkdevicesync.AttendanceRecord, 100)
 
-server.OnAttendance = func(record zkdevicesync.AttendanceRecord) {
-    attendanceChannel <- record
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+        select {
+        case attendanceChannel <- record:
+        case <-ctx.Done():
+        }
+    }),
+)
+defer server.Close()
 
 // In another goroutine, process for dashboard
 go func() {
@@ -137,39 +152,89 @@ go func() {
 ### Request Device Information
 
 ```go
-server.SendInfoCommand("DEVICE001")
+if err := server.SendInfoCommand("DEVICE001"); err != nil {
+    log.Printf("Failed to queue INFO command: %v", err)
+}
 ```
 
 The device will respond with its configuration, which you can handle:
 
 ```go
-server.OnDeviceInfo = func(sn string, info map[string]string) {
-    fmt.Printf("Device %s info:\n", sn)
-    for key, value := range info {
-        fmt.Printf("  %s: %s\n", key, value)
-    }
-}
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+        fmt.Printf("Device %s info:\n", sn)
+        for key, value := range info {
+            fmt.Printf("  %s: %s\n", key, value)
+        }
+    }),
+)
+defer server.Close()
 ```
 
 ### Custom Commands
 
 ```go
-// Restart device
-server.SendCommand("DEVICE001", "CHECK")
+// Queue a command for the device (returns error if queue limit reached)
+if err := server.QueueCommand("DEVICE001", "CHECK"); err != nil {
+    log.Printf("Failed to queue command: %v", err)
+}
 
-// Clear admin privileges
-server.SendCommand("DEVICE001", "CLEAR DATA")
+// Drain all pending commands (useful for custom polling logic)
+cmds := server.DrainCommands("DEVICE001")
+```
+
+## Configuring the Server
+
+Use functional options to customize behavior:
+
+```go
+server := zkdevicesync.NewADMSServer(
+    // Use a custom structured logger
+    zkdevicesync.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil))),
+
+    // Limit request body size to 5 MB
+    zkdevicesync.WithMaxBodySize(5 << 20),
+
+    // Consider devices offline after 5 minutes of inactivity
+    zkdevicesync.WithOnlineThreshold(5 * time.Minute),
+
+    // Limit registered devices (0 = unlimited)
+    zkdevicesync.WithMaxDevices(100),
+
+    // Limit queued commands per device (0 = unlimited)
+    zkdevicesync.WithMaxCommandsPerDevice(50),
+
+    // Enable the /iclock/inspect debug endpoint (disabled by default)
+    zkdevicesync.WithEnableInspect(),
+
+    // Tie the server to an application-level context
+    zkdevicesync.WithBaseContext(appCtx),
+
+    // Register callbacks
+    zkdevicesync.WithOnAttendance(handleAttendance),
+    zkdevicesync.WithOnDeviceInfo(handleDeviceInfo),
+    zkdevicesync.WithOnRegistry(handleRegistry),
+)
+defer server.Close()
 ```
 
 ## Monitoring Connected Devices
 
-In addition to the simple text endpoint below, the library provides a JSON inspection endpoint you can register:
+The library provides a built-in JSON inspection endpoint. It is **disabled by default** in the `ServeHTTP` router for security. Enable it with `WithEnableInspect()`, or register the handler directly on your own mux:
 
 ```go
+// Option 1: Enable in the default router
+server := zkdevicesync.NewADMSServer(
+    zkdevicesync.WithEnableInspect(),
+)
+
+// Option 2: Register on your own mux (always available)
 http.HandleFunc("/iclock/inspect", server.HandleInspect)
 ```
 
-This will return a JSON snapshot with devices, lastActivity (RFC3339), online flag, and parsed options (from registry).
+This returns a JSON snapshot with `serial`, `lastActivity` (RFC3339), `online` flag, and parsed `options` (from registry) for each device.
+
+You can also query devices programmatically:
 
 ```go
 http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
@@ -221,16 +286,15 @@ curl -X POST "http://localhost:8080/iclock/registry?SN=TEST001" \
 
 ### No Attendance Records Received
 
-1. **Verify device is registered:**
-   ```bash
-   curl http://localhost:8080/devices
-   ```
+1. **Verify device is registered** — check the `/iclock/inspect` endpoint for device status
 
-2. **Check OnAttendance callback is set:**
+2. **Ensure a callback is set:**
    ```go
-   if server.OnAttendance == nil {
-       log.Fatal("OnAttendance callback not set!")
-   }
+   server := zkdevicesync.NewADMSServer(
+       zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+           log.Printf("Got record: %+v", record)
+       }),
+   )
    ```
 
 3. **Test with simulated data** (see above)
@@ -245,7 +309,7 @@ curl -X POST "http://localhost:8080/iclock/registry?SN=TEST001" \
 
 - Review the [examples](./examples) directory for complete applications
 - Read the [API documentation](./README.md#api-reference)
-- Integrate with your database using [database_integration.go](./examples/database_integration.go) as a template
+- Integrate with your database using the [database example](./examples/database) as a template
 - Add authentication/authorization if needed
 - Set up HTTPS with a reverse proxy (nginx/caddy) for production
 
@@ -258,14 +322,21 @@ For issues or questions:
 
 ## Security Considerations
 
-⚠️ **Important for Production:**
+**Built-in protections:**
+
+- **Serial number validation** — all endpoints reject malformed device IDs (empty, too long, special characters)
+- **Device registration limits** — `WithMaxDevices(n)` caps how many devices can register
+- **Command queue limits** — `WithMaxCommandsPerDevice(n)` prevents unbounded queue growth
+- **Request body limits** — `WithMaxBodySize(n)` prevents oversized payloads
+- **Debug endpoint opt-in** — `/iclock/inspect` is disabled unless `WithEnableInspect()` is set
+
+**Additional measures for production:**
 
 1. **Add authentication** - the basic protocol doesn't include authentication
 2. **Use HTTPS** - set up a reverse proxy with TLS
-3. **Validate input** - always validate device serial numbers and user IDs
-4. **Rate limiting** - prevent abuse with rate limiting middleware
-5. **Access control** - restrict which IPs can connect
-6. **Log monitoring** - monitor for suspicious activity
+3. **Rate limiting** - prevent abuse with rate limiting middleware
+4. **Access control** - restrict which IPs can connect
+5. **Log monitoring** - monitor for suspicious activity
 
 Example with basic authentication:
 

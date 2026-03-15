@@ -1,0 +1,55 @@
+version: "2"
+
+run:
+  go: "1.26"
+
+linters:
+  default: standard
+  enable:
+    - copyloopvar
+    - errname
+    - gochecknoinits
+    - gocritic
+    - goprintffuncname
+    - makezero
+    - misspell
+    - nilerr
+    - prealloc
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - whitespace
+  settings:
+    errcheck:
+      exclude-functions:
+        # Writing to http.ResponseWriter conventionally ignores errors.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gocritic:
+      disabled-checks:
+        - commentFormatting # we have our own style
+    misspell:
+      locale: US
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      # Allow deprecated wrappers to reference deprecated symbols.
+      - linters:
+          - staticcheck
+        text: "SA1019"
+      # Example code is intentionally simplified.
+      - path: examples/
+        linters:
+          - errcheck
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
