@@ -1,6 +1,10 @@
-//go:build database_integration
-// +build database_integration
-
+// Command database demonstrates a ZKTeco ADMS server with an in-memory
+// attendance store and JSON query endpoints, modelled after a typical
+// database-backed integration.
+//
+// Run with:
+//
+//	go run ./examples/database
 package main
 
 import (
@@ -17,7 +21,7 @@ import (
 	// _ "github.com/lib/pq"
 )
 
-// AttendanceStore demonstrates how to integrate with a database
+// AttendanceStore demonstrates how to integrate with a database.
 type AttendanceStore struct {
 	mu      sync.Mutex
 	records []zkdevicesync.AttendanceRecord
@@ -25,13 +29,14 @@ type AttendanceStore struct {
 	// db *sql.DB
 }
 
+// NewAttendanceStore returns a new empty store.
 func NewAttendanceStore() *AttendanceStore {
 	return &AttendanceStore{
 		records: make([]zkdevicesync.AttendanceRecord, 0),
 	}
 }
 
-// SaveAttendance saves an attendance record
+// SaveAttendance saves an attendance record.
 func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -58,7 +63,7 @@ func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) e
 	return nil
 }
 
-// GetRecords returns all stored records
+// GetRecords returns all stored records.
 func (s *AttendanceStore) GetRecords() []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -68,7 +73,7 @@ func (s *AttendanceStore) GetRecords() []zkdevicesync.AttendanceRecord {
 	return result
 }
 
-// GetRecordsByUser returns records for a specific user
+// GetRecordsByUser returns records for a specific user.
 func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,7 +87,7 @@ func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.Attenda
 	return result
 }
 
-// GetRecordsByDateRange returns records within a date range
+// GetRecordsByDateRange returns records within a date range.
 func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkdevicesync.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,6 +201,7 @@ func main() {
 				UserID:    rec.UserID,
 				Timestamp: rec.Timestamp.Format(time.RFC3339),
 				Status:    rec.Status,
+				Device:    rec.SerialNumber,
 			}
 		}
 
@@ -208,9 +214,9 @@ func main() {
 	addr := ":8080"
 	log.Printf("Server with database integration starting on %s\n", addr)
 	log.Println("Endpoints:")
-	log.Println("  /iclock/* - ZKTeco device endpoints")
-	log.Println("  /api/attendance - Query attendance records")
-	log.Println("  /api/summary/today - Get today's attendance summary")
+	log.Println("  /iclock/*            - ZKTeco device endpoints")
+	log.Println("  /api/attendance      - Query attendance records")
+	log.Println("  /api/summary/today   - Get today's attendance summary")
 
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)

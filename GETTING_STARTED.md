@@ -309,7 +309,7 @@ curl -X POST "http://localhost:8080/iclock/registry?SN=TEST001" \
 
 - Review the [examples](./examples) directory for complete applications
 - Read the [API documentation](./README.md#api-reference)
-- Integrate with your database using [database_integration.go](./examples/database_integration.go) as a template
+- Integrate with your database using the [database example](./examples/database) as a template
 - Add authentication/authorization if needed
 - Set up HTTPS with a reverse proxy (nginx/caddy) for production
 

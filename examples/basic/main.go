@@ -1,6 +1,9 @@
-//go:build basic_server
-// +build basic_server
-
+// Command basic demonstrates a minimal ZKTeco ADMS server with device
+// status and command-sending endpoints.
+//
+// Run with:
+//
+//	go run ./examples/basic
 package main
 
 import (
@@ -57,7 +60,7 @@ func main() {
 	defer server.Close()
 
 	// Register some known devices (optional).
-	// RegisterDevice now returns an error for invalid serial numbers or
+	// RegisterDevice returns an error for invalid serial numbers or
 	// when the device limit (WithMaxDevices) has been reached.
 	for _, sn := range []string{"DEVICE001", "DEVICE002"} {
 		if err := server.RegisterDevice(sn); err != nil {
@@ -85,7 +88,7 @@ func main() {
 
 	// Add a command endpoint to send commands to devices
 	http.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
+		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -109,13 +112,13 @@ func main() {
 	addr := ":8080"
 	fmt.Printf("ZKTeco iClock Server starting on %s\n", addr)
 	fmt.Println("Endpoints:")
-	fmt.Println("  /iclock/cdata - Attendance data endpoint")
-	fmt.Println("  /iclock/registry - Device registry/capabilities endpoint")
+	fmt.Println("  /iclock/cdata      - Attendance data endpoint")
+	fmt.Println("  /iclock/registry   - Device registry/capabilities endpoint")
 	fmt.Println("  /iclock/getrequest - Device polling endpoint")
-	fmt.Println("  /iclock/devicecmd - Command confirmation endpoint")
-	fmt.Println("  /iclock/inspect - JSON device snapshot (opt-in via WithEnableInspect)")
-	fmt.Println("  /status - View connected devices")
-	fmt.Println("  /command - Send commands to devices (POST)")
+	fmt.Println("  /iclock/devicecmd  - Command confirmation endpoint")
+	fmt.Println("  /iclock/inspect    - JSON device snapshot (opt-in via WithEnableInspect)")
+	fmt.Println("  /status            - View connected devices")
+	fmt.Println("  /command           - Send commands to devices (POST)")
 	fmt.Println()
 
 	if err := http.ListenAndServe(addr, nil); err != nil {

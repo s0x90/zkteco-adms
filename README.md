@@ -300,13 +300,13 @@ Supported timestamp formats:
 
 See the [examples](./examples) directory for complete examples:
 
-- **[basic_server.go](./examples/basic_server.go)** - Simple server with status endpoint
-- **[database_integration.go](./examples/database_integration.go)** - Integration with database storage
+- **[basic](./examples/basic)** - Simple server with status endpoint
+- **[database](./examples/database)** - Integration with database storage
 
 ### Running Examples
 
 ```bash
-go run -tags basic_server ./examples/basic_server.go
+go run ./examples/basic
 ```
 
 Then configure your ZKTeco device to connect to:
