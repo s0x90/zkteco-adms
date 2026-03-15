@@ -247,7 +247,9 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.QueueCommand(serialNumber, "INFO")
+	if err := server.QueueCommand(serialNumber, "INFO"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/iclock/cdata?SN="+serialNumber, nil)
 	w := httptest.NewRecorder()
@@ -267,7 +269,9 @@ func TestHandleGetRequest(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.QueueCommand(serialNumber, "DATA QUERY USER")
+	if err := server.QueueCommand(serialNumber, "DATA QUERY USER"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/iclock/getrequest?SN="+serialNumber, nil)
 	w := httptest.NewRecorder()
@@ -456,7 +460,9 @@ func TestHandleRegistry_Callback(t *testing.T) {
 func TestHandleInspect_JSON(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
-	server.RegisterDevice("A1")
+	if err := server.RegisterDevice("A1"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 	// Mark old activity to test offline
 	server.devicesMutex.Lock()
 	server.devices["A1"].LastActivity = time.Now().Add(-3 * time.Minute)
@@ -494,7 +500,9 @@ func TestIsDeviceOnline(t *testing.T) {
 		t.Error("Expected false for non-existent device")
 	}
 
-	server.RegisterDevice("ONLINE001")
+	if err := server.RegisterDevice("ONLINE001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 	if !server.IsDeviceOnline("ONLINE001") {
 		t.Error("Expected newly registered device to be online")
 	}
@@ -736,9 +744,11 @@ func TestListDevices(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	server.RegisterDevice("TEST001")
-	server.RegisterDevice("TEST002")
-	server.RegisterDevice("TEST003")
+	for _, sn := range []string{"TEST001", "TEST002", "TEST003"} {
+		if err := server.RegisterDevice(sn); err != nil {
+			t.Fatalf("RegisterDevice(%s) failed: %v", sn, err)
+		}
+	}
 
 	devices := server.ListDevices()
 	if len(devices) != 3 {
@@ -763,7 +773,9 @@ func TestUpdateDeviceActivity(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.RegisterDevice(serialNumber)
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -790,14 +802,14 @@ func TestConcurrentAccess(t *testing.T) {
 	// Concurrent device registration
 	for range 10 {
 		wg.Go(func() {
-			server.RegisterDevice(serialNumber)
+			_ = server.RegisterDevice(serialNumber)
 		})
 	}
 
 	// Concurrent command queuing
 	for range 10 {
 		wg.Go(func() {
-			server.QueueCommand(serialNumber, "INFO")
+			_ = server.QueueCommand(serialNumber, "INFO")
 		})
 	}
 
@@ -1200,7 +1212,9 @@ func TestReadBody_ExceedsLimit(t *testing.T) {
 	defer server.Close()
 
 	server.maxBodySize = 10 // 10 bytes limit
-	server.RegisterDevice("TEST001")
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	// Send a body larger than the limit via the ATTLOG handler.
 	largeBody := strings.Repeat("x", 20)
@@ -1222,7 +1236,9 @@ func TestReadBody_WithinLimit(t *testing.T) {
 	defer server.Close()
 
 	server.maxBodySize = 1024 // 1 KB limit
-	server.RegisterDevice("TEST001")
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	body := "123\t2024-01-01 08:00:00\t0\t1\t0"
 	req := httptest.NewRequest(http.MethodPost,
@@ -1243,7 +1259,9 @@ func TestReadBody_ExceedsLimit_DeviceCmd(t *testing.T) {
 	defer server.Close()
 
 	server.maxBodySize = 5
-	server.RegisterDevice("TEST001")
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/iclock/devicecmd?SN=TEST001", strings.NewReader("this body exceeds the limit"))
@@ -1260,7 +1278,9 @@ func TestReadBody_ExceedsLimit_Registry(t *testing.T) {
 	defer server.Close()
 
 	server.maxBodySize = 5
-	server.RegisterDevice("TEST001")
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/iclock/registry?SN=TEST001", strings.NewReader("DeviceType=acc,DeviceName=SpeedFace"))
@@ -1429,7 +1449,9 @@ func TestWithOnlineThreshold(t *testing.T) {
 	server := NewADMSServer(WithOnlineThreshold(50 * time.Millisecond))
 	defer server.Close()
 
-	server.RegisterDevice("THRESH001")
+	if err := server.RegisterDevice("THRESH001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 	if !server.IsDeviceOnline("THRESH001") {
 		t.Fatal("newly registered device should be online")
 	}
@@ -1486,8 +1508,12 @@ func TestDrainCommands(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	server.QueueCommand("DRAIN001", "CMD1")
-	server.QueueCommand("DRAIN001", "CMD2")
+	if err := server.QueueCommand("DRAIN001", "CMD1"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
+	if err := server.QueueCommand("DRAIN001", "CMD2"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 
 	commands := server.DrainCommands("DRAIN001")
 	if len(commands) != 2 {
@@ -1508,7 +1534,9 @@ func TestDrainCommands_DeletesKey(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	server.QueueCommand("DRAIN_DEL", "INFO")
+	if err := server.QueueCommand("DRAIN_DEL", "INFO"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 	_ = server.DrainCommands("DRAIN_DEL")
 
 	server.queueMutex.RLock()
@@ -1525,7 +1553,9 @@ func TestGetCommands_BackwardCompat(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	server.QueueCommand("COMPAT001", "INFO")
+	if err := server.QueueCommand("COMPAT001", "INFO"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 	commands := server.GetCommands("COMPAT001")
 	if len(commands) != 1 || commands[0] != "INFO" {
 		t.Errorf("GetCommands backward compat broken: %v", commands)

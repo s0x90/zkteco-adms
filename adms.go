@@ -507,11 +507,10 @@ func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
 
 // bodyPreview returns a truncated preview of body for logging (max 200 bytes).
 func bodyPreview(body []byte) string {
-	preview := string(body)
-	if len(preview) > 200 {
-		return preview[:200] + "..."
+	if len(body) > 200 {
+		return string(body[:200]) + "..."
 	}
-	return preview
+	return string(body)
 }
 
 // validateSerialNumber checks that a serial number is non-empty and matches
