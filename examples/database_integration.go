@@ -108,7 +108,7 @@ type attendanceEntry struct {
 	UserID    string `json:"user_id,omitempty"`
 	Timestamp string `json:"timestamp"`
 	Status    int    `json:"status"`
-	Device    string `json:"device"`
+	Device    string `json:"device,omitempty"`
 }
 
 // summaryResponse is the JSON structure for the daily summary endpoint.

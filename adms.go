@@ -54,12 +54,16 @@ const (
 	defaultDispatchTimeout = 1 * time.Second
 )
 
-// Sentinel errors returned by the server.
+// Sentinel errors defined for use by callers.
+//
+// These errors are not yet returned by any exported method but are provided
+// so that callers can prepare error-matching logic (e.g. errors.Is) for
+// future versions where they will be surfaced from relevant operations.
 var (
-	// ErrServerClosed is returned when an operation is attempted on a closed server.
+	// ErrServerClosed indicates an operation was attempted on a closed server.
 	ErrServerClosed = errors.New("zkdevicesync: server closed")
 
-	// ErrCallbackQueueFull is returned when the callback queue is full and the
+	// ErrCallbackQueueFull indicates the callback queue is full and the
 	// dispatch timeout has expired.
 	ErrCallbackQueueFull = errors.New("zkdevicesync: callback queue full")
 )
@@ -206,16 +210,19 @@ type ADMSServer struct {
 	queueMutex   sync.RWMutex
 
 	// OnAttendance is called for each attendance record received.
+	// Must be set before serving requests; concurrent mutation is not safe.
 	//
 	// Deprecated: Use [WithOnAttendance] instead.
 	OnAttendance func(record AttendanceRecord)
 
 	// OnDeviceInfo is called when a device posts its info parameters.
+	// Must be set before serving requests; concurrent mutation is not safe.
 	//
 	// Deprecated: Use [WithOnDeviceInfo] instead.
 	OnDeviceInfo func(sn string, info map[string]string)
 
 	// OnRegistry is called when a device registers or re-registers.
+	// Must be set before serving requests; concurrent mutation is not safe.
 	//
 	// Deprecated: Use [WithOnRegistry] instead.
 	OnRegistry func(sn string, info map[string]string)
@@ -928,8 +935,13 @@ func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
-	w.Write([]byte("\n"))
+	if _, err = w.Write(data); err != nil {
+		s.logger.Warn("failed to write inspect response", "error", err)
+		return
+	}
+	if _, err = w.Write([]byte("\n")); err != nil {
+		s.logger.Warn("failed to write inspect trailing newline", "error", err)
+	}
 }
 
 // parseRegistryBody parses comma-separated key=value pairs from registry POST body.
