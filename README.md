@@ -1,7 +1,7 @@
 # ZKTeco Sync
 
 [![Test](https://github.com/s0x90/zkteco-sync/actions/workflows/test.yml/badge.svg)](https://github.com/s0x90/zkteco-sync/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/s0x90/zkteco-sync/graph/badge.svg)](https://codecov.io/gh/s0x90/zkteco-sync)
+[![codecov](https://codecov.io/gh/s0x90/zkteco-sync/graph/badge.svg?token=4RWDG59BGM)](https://codecov.io/gh/s0x90/zkteco-sync)
 
 A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendance devices.
 
