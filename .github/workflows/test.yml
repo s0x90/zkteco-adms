@@ -42,4 +42,10 @@ jobs:
           go build -o /dev/null ./examples/database
 
       - name: Test
-        run: go test -v -race -cover ./...
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
