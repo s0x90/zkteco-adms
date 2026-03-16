@@ -428,9 +428,8 @@ The following are retained for backward compatibility and will be removed in a f
 Configure your ZKTeco device to connect to your server:
 
 1. Access device web interface or admin panel
-2. Set server address: `http://your-server:8080/iclock/`
-3. Set upload interval (recommended: 60 seconds)
-4. Enable real-time upload for immediate attendance transmission
+2. Chose ADMS
+3. Set server address: `http://your-server:8080`
 
 ## License
 
