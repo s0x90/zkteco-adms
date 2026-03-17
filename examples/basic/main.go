@@ -60,7 +60,7 @@ func main() {
 			fmt.Printf("  User ID: %s\n", record.UserID)
 			fmt.Printf("  Timestamp: %s\n", record.Timestamp.Format(time.RFC3339))
 			fmt.Printf("  Status: %d (0=Check In, 1=Check Out)\n", record.Status)
-			fmt.Printf("  Verify Mode: %d (0=Password, 1=Fingerprint, 2=Card)\n", record.VerifyMode)
+			fmt.Printf("  Verify Mode: %s (%d)\n", zkdevicesync.VerifyModeName(record.VerifyMode), record.VerifyMode)
 			fmt.Printf("  Work Code: %s\n", record.WorkCode)
 			fmt.Println("---")
 		}),

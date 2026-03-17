@@ -96,7 +96,7 @@ PIN=1001    DateTime=2025-09-02 14:32:11    Verified=1    Status=0
 PIN=1002    DateTime=2025-09-02 14:35:54    Verified=1    Status=0
 PIN = user ID
 DateTime = timestamp of check-in/out
-Verified = verification mode (1=fingerprint, 15=face, etc.)
+Verified = verification mode (0=password, 1=fingerprint, 4=card, 15=face, 25=palm, etc.)
 Status = check type (0=check-in, 1=check-out, etc.)
 ```
 

@@ -101,6 +101,49 @@ const (
 	cmdFormat = "C:%s\n"
 )
 
+// Verify mode constants for the ADMS protocol.
+//
+// These values represent the verification method used by ZKTeco devices
+// when recording attendance via the ADMS (Push) HTTP protocol. Note that
+// these differ from the binary TCP/IP protocol values documented in the
+// ZK protocol specification.
+//
+// Devices may report different numeric codes depending on firmware version
+// and configured verification rules. Use [VerifyModeName] to obtain a
+// human-readable label for any verify mode value.
+const (
+	VerifyModePassword    = 0  // Password verification
+	VerifyModeFingerprint = 1  // Fingerprint verification
+	VerifyModeCard        = 4  // RF card verification
+	VerifyModeFace        = 15 // Facial recognition
+	VerifyModePalm        = 25 // Palm verification
+)
+
+// verifyModeNames maps known ADMS verify mode values to human-readable names.
+var verifyModeNames = map[int]string{
+	0:  "Password",
+	1:  "Fingerprint",
+	2:  "Card",     // legacy/alternative card code used by some firmware
+	3:  "Password", // alternative password code used by some devices
+	4:  "Card",     // primary ADMS card code
+	5:  "Fingerprint+Card",
+	6:  "Fingerprint+Password",
+	7:  "Card+Password",
+	8:  "Card+Fingerprint+Password",
+	9:  "Other",
+	15: "Face",
+	25: "Palm",
+}
+
+// VerifyModeName returns a human-readable name for the given ADMS verify mode
+// value. If the value is not recognized, it returns "Unknown (<value>)".
+func VerifyModeName(mode int) string {
+	if name, ok := verifyModeNames[mode]; ok {
+		return name
+	}
+	return fmt.Sprintf("Unknown (%d)", mode)
+}
+
 // Sentinel errors returned by the server.
 var (
 	// ErrServerClosed is returned when an operation is attempted on a closed server.
@@ -274,7 +317,7 @@ type AttendanceRecord struct {
 	UserID       string
 	Timestamp    time.Time
 	Status       int // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, etc.
-	VerifyMode   int // 0=Password, 1=Fingerprint, 2=Card, etc.
+	VerifyMode   int // Verification method; see VerifyMode* constants and [VerifyModeName].
 	WorkCode     string
 	SerialNumber string
 }

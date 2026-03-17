@@ -524,6 +524,56 @@ func TestParseRegistryBody(t *testing.T) {
 	}
 }
 
+func TestVerifyModeName(t *testing.T) {
+	tests := []struct {
+		mode int
+		want string
+	}{
+		{VerifyModePassword, "Password"},
+		{VerifyModeFingerprint, "Fingerprint"},
+		{VerifyModeCard, "Card"},
+		{VerifyModeFace, "Face"},
+		{VerifyModePalm, "Palm"},
+		// Alternative/legacy codes
+		{2, "Card"},
+		{3, "Password"},
+		// Multi-factor combinations
+		{5, "Fingerprint+Card"},
+		{6, "Fingerprint+Password"},
+		{7, "Card+Password"},
+		{8, "Card+Fingerprint+Password"},
+		{9, "Other"},
+		// Unknown value
+		{99, "Unknown (99)"},
+		{-1, "Unknown (-1)"},
+	}
+	for _, tt := range tests {
+		got := VerifyModeName(tt.mode)
+		if got != tt.want {
+			t.Errorf("VerifyModeName(%d) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestVerifyModeConstants(t *testing.T) {
+	// Verify that the exported constants have the expected values.
+	if VerifyModePassword != 0 {
+		t.Errorf("VerifyModePassword = %d, want 0", VerifyModePassword)
+	}
+	if VerifyModeFingerprint != 1 {
+		t.Errorf("VerifyModeFingerprint = %d, want 1", VerifyModeFingerprint)
+	}
+	if VerifyModeCard != 4 {
+		t.Errorf("VerifyModeCard = %d, want 4", VerifyModeCard)
+	}
+	if VerifyModeFace != 15 {
+		t.Errorf("VerifyModeFace = %d, want 15", VerifyModeFace)
+	}
+	if VerifyModePalm != 25 {
+		t.Errorf("VerifyModePalm = %d, want 25", VerifyModePalm)
+	}
+}
+
 func TestParseAttendanceRecords(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
