@@ -134,7 +134,7 @@ zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.Atte
     // record.UserID       - Employee ID
     // record.Timestamp    - Time of attendance
     // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
-    // record.VerifyMode   - 0=Password, 1=Fingerprint, 2=Card
+    // record.VerifyMode   - Verification method; use zkdevicesync.VerifyModeName() for label
     // record.WorkCode     - Optional work code
     // record.SerialNumber - Device serial number
     //
@@ -294,10 +294,27 @@ Supported timestamp formats:
 
 ### Verify Mode
 
-- `0` - Password
-- `1` - Fingerprint
-- `2` - Card
-- `3` - Face Recognition
+These are the ADMS protocol verify mode values observed from real devices.
+Use `zkdevicesync.VerifyModeName(mode)` to resolve any value to a human-readable label.
+
+| Value | Method |
+|-------|--------|
+| `0` | Password |
+| `1` | Fingerprint |
+| `2` | Card (legacy) |
+| `3` | Password (alternative) |
+| `4` | Card |
+| `5` | Fingerprint+Card |
+| `6` | Fingerprint+Password |
+| `7` | Card+Password |
+| `8` | Card+Fingerprint+Password |
+| `9` | Other |
+| `15` | Face |
+| `25` | Palm |
+
+> **Note:** Values may vary across device models and firmware versions.
+> The constants `VerifyModePassword`, `VerifyModeFingerprint`, `VerifyModeCard`,
+> `VerifyModeFace`, and `VerifyModePalm` are provided for the most common codes.
 
 ## Examples
 
