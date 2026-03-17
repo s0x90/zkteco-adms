@@ -79,7 +79,7 @@ type AttendanceRecord struct {
     UserID       string    // Employee ID (e.g., "123")
     Timestamp    time.Time // When the attendance occurred
     Status       int       // 0=Check In, 1=Check Out
-    VerifyMode   int       // 0=Password, 1=Fingerprint, 2=Card
+    VerifyMode   int       // Verification method; see VerifyMode* constants and VerifyModeName(mode)
     WorkCode     string    // Optional work code
     SerialNumber string    // Device that recorded this
 }
