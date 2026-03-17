@@ -134,7 +134,7 @@ zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.Atte
     // record.UserID       - Employee ID
     // record.Timestamp    - Time of attendance
     // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
-    // record.VerifyMode   - Verification method; use zkdevicesync.VerifyModeName() for label
+    // record.VerifyMode   - Verification method; use zkdevicesync.VerifyModeName(record.VerifyMode) for label
     // record.WorkCode     - Optional work code
     // record.SerialNumber - Device serial number
     //
