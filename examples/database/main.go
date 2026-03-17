@@ -39,14 +39,16 @@ func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
+		defer func() {
+			slog.Info("http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote", r.RemoteAddr,
+				"status", rec.status,
+				"duration", time.Since(start),
+			)
+		}()
 		next.ServeHTTP(rec, r)
-		slog.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"remote", r.RemoteAddr,
-			"status", rec.status,
-			"duration", time.Since(start),
-		)
 	})
 }
 
