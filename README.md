@@ -1,7 +1,7 @@
-# ZKTeco Sync
+# ZKTeco ADMS
 
-[![Test](https://github.com/s0x90/zkteco-sync/actions/workflows/test.yml/badge.svg)](https://github.com/s0x90/zkteco-sync/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/s0x90/zkteco-sync/graph/badge.svg?token=4RWDG59BGM)](https://codecov.io/gh/s0x90/zkteco-sync)
+[![Test](https://github.com/s0x90/zkteco-adms/actions/workflows/test.yml/badge.svg)](https://github.com/s0x90/zkteco-adms/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/s0x90/zkteco-adms/graph/badge.svg?token=4RWDG59BGM)](https://codecov.io/gh/s0x90/zkteco-adms)
 
 A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendance devices.
 
@@ -33,7 +33,7 @@ Zero external dependencies — pure Go standard library.
 Requires Go 1.26 or higher.
 
 ```bash
-go get github.com/s0x90/zkteco-sync
+go get github.com/s0x90/zkteco-adms
 ```
 
 ## Quick Start
@@ -48,19 +48,19 @@ import (
     "net/http"
     "time"
 
-    zkdevicesync "github.com/s0x90/zkteco-sync"
+    zkadms "github.com/s0x90/zkteco-adms"
 )
 
 func main() {
-    server := zkdevicesync.NewADMSServer(
-        zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+    server := zkadms.NewADMSServer(
+        zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
             fmt.Printf("User %s checked %s at %s from device %s\n",
                 record.UserID,
                 statusString(record.Status),
                 record.Timestamp.Format(time.RFC3339),
                 record.SerialNumber)
         }),
-        zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+        zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
             fmt.Printf("Device %s connected: %v\n", sn, info)
         }),
     )
@@ -89,7 +89,7 @@ func statusString(status int) string {
 ```go
 // Defaults: slog.Default() logger, 10 MB body limit, 256 callback buffer,
 // 2-minute online threshold, 1-second dispatch timeout.
-server := zkdevicesync.NewADMSServer()
+server := zkadms.NewADMSServer()
 defer server.Close()
 ```
 
@@ -98,16 +98,16 @@ defer server.Close()
 Configure the server at construction time:
 
 ```go
-server := zkdevicesync.NewADMSServer(
-    zkdevicesync.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil))),
-    zkdevicesync.WithMaxBodySize(5 << 20),              // 5 MB body limit
-    zkdevicesync.WithCallbackBufferSize(512),            // larger callback buffer
-    zkdevicesync.WithOnlineThreshold(5 * time.Minute),   // 5 min before "offline"
-    zkdevicesync.WithDispatchTimeout(2 * time.Second),   // callback dispatch timeout
-    zkdevicesync.WithBaseContext(ctx),                    // tie to parent context
-    zkdevicesync.WithOnAttendance(handleAttendance),
-    zkdevicesync.WithOnDeviceInfo(handleDeviceInfo),
-    zkdevicesync.WithOnRegistry(handleRegistry),
+server := zkadms.NewADMSServer(
+    zkadms.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil))),
+    zkadms.WithMaxBodySize(5 << 20),              // 5 MB body limit
+    zkadms.WithCallbackBufferSize(512),            // larger callback buffer
+    zkadms.WithOnlineThreshold(5 * time.Minute),   // 5 min before "offline"
+    zkadms.WithDispatchTimeout(2 * time.Second),   // callback dispatch timeout
+    zkadms.WithBaseContext(ctx),                    // tie to parent context
+    zkadms.WithOnAttendance(handleAttendance),
+    zkadms.WithOnDeviceInfo(handleDeviceInfo),
+    zkadms.WithOnRegistry(handleRegistry),
 )
 defer server.Close()
 ```
@@ -130,11 +130,11 @@ defer server.Close()
 ### Handling Attendance Records
 
 ```go
-zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
     // record.UserID       - Employee ID
     // record.Timestamp    - Time of attendance
     // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
-    // record.VerifyMode   - Verification method; use zkdevicesync.VerifyModeName(record.VerifyMode) for label
+    // record.VerifyMode   - Verification method; use zkadms.VerifyModeName(record.VerifyMode) for label
     // record.WorkCode     - Optional work code
     // record.SerialNumber - Device serial number
     //
@@ -145,7 +145,7 @@ zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.Atte
 ### Handling Device Information
 
 ```go
-zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
     // sn   - Device serial number
     // info - Map of device properties (firmware version, device name, etc.)
 })
@@ -154,7 +154,7 @@ zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[stri
 ### Handling Device Registry
 
 ```go
-zkdevicesync.WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
+zkadms.WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
     // Called when a device registers or re-registers.
     // info contains parsed key=value pairs from the registry body.
 })
@@ -211,18 +211,18 @@ http.HandleFunc("/iclock/inspect", server.HandleInspect) // opt-in: not routed b
 
 ```go
 var (
-    zkdevicesync.ErrServerClosed       // operation attempted on a closed server
-    zkdevicesync.ErrCallbackQueueFull  // callback queue full, dispatch timed out
-    zkdevicesync.ErrMaxDevicesReached  // device limit reached (WithMaxDevices)
-    zkdevicesync.ErrCommandQueueFull   // per-device command queue full (WithMaxCommandsPerDevice)
-    zkdevicesync.ErrInvalidSerialNumber // serial number failed validation
+    zkadms.ErrServerClosed       // operation attempted on a closed server
+    zkadms.ErrCallbackQueueFull  // callback queue full, dispatch timed out
+    zkadms.ErrMaxDevicesReached  // device limit reached (WithMaxDevices)
+    zkadms.ErrCommandQueueFull   // per-device command queue full (WithMaxCommandsPerDevice)
+    zkadms.ErrInvalidSerialNumber // serial number failed validation
 )
 ```
 
 ### Graceful Shutdown
 
 ```go
-server := zkdevicesync.NewADMSServer(/* ... */)
+server := zkadms.NewADMSServer(/* ... */)
 // ... use server ...
 
 // Close drains pending callbacks, cancels the base context, and stops the worker.
@@ -295,7 +295,7 @@ Supported timestamp formats:
 ### Verify Mode
 
 These are the ADMS protocol verify mode values observed from real devices.
-Use `zkdevicesync.VerifyModeName(mode)` to resolve any value to a human-readable label.
+Use `zkadms.VerifyModeName(mode)` to resolve any value to a human-readable label.
 
 | Value | Method |
 |-------|--------|

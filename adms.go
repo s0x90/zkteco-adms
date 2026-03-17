@@ -1,4 +1,4 @@
-// Package zkdevicesync provides an implementation of the ADMS protocol
+// Package zkadms provides an implementation of the ADMS protocol
 // for ZKTeco biometric attendance devices.
 //
 // The ADMS protocol is an HTTP-based protocol used by ZKTeco devices to
@@ -6,8 +6,8 @@
 //
 // Basic usage:
 //
-//	server := zkdevicesync.NewADMSServer(
-//	    zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+//	server := zkadms.NewADMSServer(
+//	    zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
 //	        fmt.Printf("User %s at %s\n", record.UserID, record.Timestamp)
 //	    }),
 //	)
@@ -20,7 +20,7 @@
 //   - /iclock/devicecmd - receives command execution confirmations
 //
 // Call Close when the server is no longer needed to drain the callback queue.
-package zkdevicesync
+package zkadms
 
 import (
 	"context"
@@ -147,23 +147,23 @@ func VerifyModeName(mode int) string {
 // Sentinel errors returned by the server.
 var (
 	// ErrServerClosed is returned when an operation is attempted on a closed server.
-	ErrServerClosed = errors.New("zkdevicesync: server closed")
+	ErrServerClosed = errors.New("zkadms: server closed")
 
 	// ErrCallbackQueueFull is returned when the callback queue is full and the
 	// dispatch timeout has expired.
-	ErrCallbackQueueFull = errors.New("zkdevicesync: callback queue full")
+	ErrCallbackQueueFull = errors.New("zkadms: callback queue full")
 
 	// ErrMaxDevicesReached is returned by [ADMSServer.RegisterDevice] when the
 	// device limit configured via [WithMaxDevices] has been reached.
-	ErrMaxDevicesReached = errors.New("zkdevicesync: maximum number of devices reached")
+	ErrMaxDevicesReached = errors.New("zkadms: maximum number of devices reached")
 
 	// ErrCommandQueueFull is returned by [ADMSServer.QueueCommand] when the
 	// per-device command queue limit configured via [WithMaxCommandsPerDevice]
 	// has been reached.
-	ErrCommandQueueFull = errors.New("zkdevicesync: command queue full for device")
+	ErrCommandQueueFull = errors.New("zkadms: command queue full for device")
 
 	// ErrInvalidSerialNumber is returned when a serial number fails validation.
-	ErrInvalidSerialNumber = errors.New("zkdevicesync: invalid serial number")
+	ErrInvalidSerialNumber = errors.New("zkadms: invalid serial number")
 )
 
 // serialNumberRe matches valid device serial numbers: 1–64 alphanumeric
