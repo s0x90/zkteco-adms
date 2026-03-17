@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	zkdevicesync "github.com/s0x90/zkteco-sync"
+	zkadms "github.com/s0x90/zkteco-adms"
 )
 
 // ---------- statusRecorder tests ----------
@@ -123,9 +123,9 @@ func TestLogMiddleware_PreservesResponseBody(t *testing.T) {
 
 // ---------- /status endpoint tests ----------
 
-func newTestServer(t *testing.T, devices ...string) *zkdevicesync.ADMSServer {
+func newTestServer(t *testing.T, devices ...string) *zkadms.ADMSServer {
 	t.Helper()
-	server := zkdevicesync.NewADMSServer()
+	server := zkadms.NewADMSServer()
 	t.Cleanup(func() { server.Close() })
 	for _, sn := range devices {
 		if err := server.RegisterDevice(sn); err != nil {
@@ -135,7 +135,7 @@ func newTestServer(t *testing.T, devices ...string) *zkdevicesync.ADMSServer {
 	return server
 }
 
-func statusHandler(server *zkdevicesync.ADMSServer) http.Handler {
+func statusHandler(server *zkadms.ADMSServer) http.Handler {
 	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		devices := server.ListDevices()
 		w.Header().Set("Content-Type", "text/plain")
@@ -207,7 +207,7 @@ func TestStatusEndpoint_ContentType(t *testing.T) {
 
 // ---------- /command endpoint tests ----------
 
-func commandHandler(server *zkdevicesync.ADMSServer) http.Handler {
+func commandHandler(server *zkadms.ADMSServer) http.Handler {
 	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

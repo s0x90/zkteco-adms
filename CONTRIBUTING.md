@@ -1,4 +1,4 @@
-# Contributing to ZKTeco Sync
+# Contributing to ZKTeco ADMS
 
 Thank you for considering a contribution! This document explains how to get
 started.
@@ -11,8 +11,8 @@ started.
 ## Getting Started
 
 ```bash
-git clone https://github.com/s0x90/zkteco-sync.git
-cd zkteco-sync
+git clone https://github.com/s0x90/zkteco-adms.git
+cd zkteco-adms
 go test -race ./...
 ```
 
