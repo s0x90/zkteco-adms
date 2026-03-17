@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	zkdevicesync "github.com/s0x90/zkteco-sync"
+	zkadms "github.com/s0x90/zkteco-adms"
 	// Uncomment when using actual database
 	// _ "github.com/lib/pq"
 )
@@ -55,7 +55,7 @@ func logMiddleware(next http.Handler) http.Handler {
 // AttendanceStore demonstrates how to integrate with a database.
 type AttendanceStore struct {
 	mu      sync.Mutex
-	records []zkdevicesync.AttendanceRecord
+	records []zkadms.AttendanceRecord
 	// In a real application, you would use an actual database connection
 	// db *sql.DB
 }
@@ -63,12 +63,12 @@ type AttendanceStore struct {
 // NewAttendanceStore returns a new empty store.
 func NewAttendanceStore() *AttendanceStore {
 	return &AttendanceStore{
-		records: make([]zkdevicesync.AttendanceRecord, 0),
+		records: make([]zkadms.AttendanceRecord, 0),
 	}
 }
 
 // SaveAttendance saves an attendance record.
-func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) error {
+func (s *AttendanceStore) SaveAttendance(record zkadms.AttendanceRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -95,21 +95,21 @@ func (s *AttendanceStore) SaveAttendance(record zkdevicesync.AttendanceRecord) e
 }
 
 // GetRecords returns all stored records.
-func (s *AttendanceStore) GetRecords() []zkdevicesync.AttendanceRecord {
+func (s *AttendanceStore) GetRecords() []zkadms.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	result := make([]zkdevicesync.AttendanceRecord, len(s.records))
+	result := make([]zkadms.AttendanceRecord, len(s.records))
 	copy(result, s.records)
 	return result
 }
 
 // GetRecordsByUser returns records for a specific user.
-func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.AttendanceRecord {
+func (s *AttendanceStore) GetRecordsByUser(userID string) []zkadms.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var result []zkdevicesync.AttendanceRecord
+	var result []zkadms.AttendanceRecord
 	for _, record := range s.records {
 		if record.UserID == userID {
 			result = append(result, record)
@@ -119,11 +119,11 @@ func (s *AttendanceStore) GetRecordsByUser(userID string) []zkdevicesync.Attenda
 }
 
 // GetRecordsByDateRange returns records within a date range.
-func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkdevicesync.AttendanceRecord {
+func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkadms.AttendanceRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var result []zkdevicesync.AttendanceRecord
+	var result []zkadms.AttendanceRecord
 	for _, record := range s.records {
 		if record.Timestamp.After(start) && record.Timestamp.Before(end) {
 			result = append(result, record)
@@ -159,16 +159,16 @@ func main() {
 	store := NewAttendanceStore()
 
 	// Create the ADMS server with functional options
-	server := zkdevicesync.NewADMSServer(
+	server := zkadms.NewADMSServer(
 		// Save attendance records to the store
-		zkdevicesync.WithOnAttendance(func(ctx context.Context, record zkdevicesync.AttendanceRecord) {
+		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
 			if err := store.SaveAttendance(record); err != nil {
 				log.Printf("Error saving attendance: %v", err)
 			}
 		}),
 
 		// Log device info updates
-		zkdevicesync.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+		zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
 			log.Printf("Device %s info updated: %v", sn, info)
 		}),
 	)

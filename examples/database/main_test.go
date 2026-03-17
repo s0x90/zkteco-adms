@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	zkdevicesync "github.com/s0x90/zkteco-sync"
+	zkadms "github.com/s0x90/zkteco-adms"
 )
 
 // ---------- statusRecorder tests ----------
@@ -103,7 +103,7 @@ func TestAttendanceStore_SaveAndGet(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
-	rec := zkdevicesync.AttendanceRecord{
+	rec := zkadms.AttendanceRecord{
 		UserID:       "USER001",
 		Timestamp:    ts,
 		Status:       0,
@@ -132,7 +132,7 @@ func TestAttendanceStore_GetRecordsReturnsCopy(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
-	if err := store.SaveAttendance(zkdevicesync.AttendanceRecord{
+	if err := store.SaveAttendance(zkadms.AttendanceRecord{
 		UserID: "USER001", Timestamp: ts, SerialNumber: "DEV001",
 	}); err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestAttendanceStore_GetRecordsByUser(t *testing.T) {
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
 	for _, uid := range []string{"USER001", "USER002", "USER001", "USER003"} {
-		if err := store.SaveAttendance(zkdevicesync.AttendanceRecord{
+		if err := store.SaveAttendance(zkadms.AttendanceRecord{
 			UserID: uid, Timestamp: ts, SerialNumber: "DEV001",
 		}); err != nil {
 			t.Fatal(err)
@@ -180,7 +180,7 @@ func TestAttendanceStore_GetRecordsByDateRange(t *testing.T) {
 		time.Date(2026, 3, 18, 8, 0, 0, 0, time.UTC),  // tomorrow
 	}
 	for i, ts := range times {
-		if err := store.SaveAttendance(zkdevicesync.AttendanceRecord{
+		if err := store.SaveAttendance(zkadms.AttendanceRecord{
 			UserID: "USER001", Timestamp: ts, SerialNumber: "DEV001", Status: i,
 		}); err != nil {
 			t.Fatal(err)
@@ -210,7 +210,7 @@ func TestAttendanceStore_GetRecordsByDateRange_Empty(t *testing.T) {
 
 // ---------- /api/attendance endpoint tests ----------
 
-func seedStore(t *testing.T, store *AttendanceStore, records ...zkdevicesync.AttendanceRecord) {
+func seedStore(t *testing.T, store *AttendanceStore, records ...zkadms.AttendanceRecord) {
 	t.Helper()
 	for _, rec := range records {
 		if err := store.SaveAttendance(rec); err != nil {
@@ -287,8 +287,8 @@ func TestAttendanceEndpoint_AllRecords(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
-		zkdevicesync.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
-		zkdevicesync.AttendanceRecord{UserID: "U2", Timestamp: ts, Status: 1, SerialNumber: "D2"},
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U2", Timestamp: ts, Status: 1, SerialNumber: "D2"},
 	)
 
 	handler := attendanceHandler(store)
@@ -318,9 +318,9 @@ func TestAttendanceEndpoint_FilterByUser(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
-		zkdevicesync.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
-		zkdevicesync.AttendanceRecord{UserID: "U2", Timestamp: ts, Status: 1, SerialNumber: "D1"},
-		zkdevicesync.AttendanceRecord{UserID: "U1", Timestamp: ts.Add(time.Hour), Status: 1, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U2", Timestamp: ts, Status: 1, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts.Add(time.Hour), Status: 1, SerialNumber: "D1"},
 	)
 
 	handler := attendanceHandler(store)
@@ -353,7 +353,7 @@ func TestAttendanceEndpoint_FilterByUnknownUser(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
-		zkdevicesync.AttendanceRecord{UserID: "U1", Timestamp: ts, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, SerialNumber: "D1"},
 	)
 
 	handler := attendanceHandler(store)
@@ -434,22 +434,22 @@ func TestSummaryEndpoint_OnlyTodayRecords(t *testing.T) {
 
 	seedStore(t, store,
 		// Yesterday — should be excluded.
-		zkdevicesync.AttendanceRecord{
+		zkadms.AttendanceRecord{
 			UserID: "U1", Timestamp: now.Add(-24 * time.Hour),
 			SerialNumber: "D1", Status: 0,
 		},
 		// Today morning.
-		zkdevicesync.AttendanceRecord{
+		zkadms.AttendanceRecord{
 			UserID: "U1", Timestamp: now,
 			SerialNumber: "D1", Status: 0,
 		},
 		// Today afternoon.
-		zkdevicesync.AttendanceRecord{
+		zkadms.AttendanceRecord{
 			UserID: "U2", Timestamp: now,
 			SerialNumber: "D1", Status: 1,
 		},
 		// Tomorrow — should be excluded.
-		zkdevicesync.AttendanceRecord{
+		zkadms.AttendanceRecord{
 			UserID: "U3", Timestamp: now.Add(24 * time.Hour),
 			SerialNumber: "D1", Status: 0,
 		},
@@ -490,7 +490,7 @@ func TestSummaryEndpoint_ValidJSON(t *testing.T) {
 	store := NewAttendanceStore()
 	now := time.Now()
 	seedStore(t, store,
-		zkdevicesync.AttendanceRecord{
+		zkadms.AttendanceRecord{
 			UserID: "U1", Timestamp: now, SerialNumber: "D1", Status: 0,
 		},
 	)

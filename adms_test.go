@@ -1,4 +1,4 @@
-package zkdevicesync
+package zkadms
 
 import (
 	"bytes"
@@ -1696,10 +1696,10 @@ func TestWithCallbackBufferSize_ZeroIgnored(t *testing.T) {
 
 func TestSentinelErrors(t *testing.T) {
 	// Verify sentinel errors exist and have expected messages.
-	if ErrServerClosed.Error() != "zkdevicesync: server closed" {
+	if ErrServerClosed.Error() != "zkadms: server closed" {
 		t.Errorf("unexpected ErrServerClosed message: %s", ErrServerClosed.Error())
 	}
-	if ErrCallbackQueueFull.Error() != "zkdevicesync: callback queue full" {
+	if ErrCallbackQueueFull.Error() != "zkadms: callback queue full" {
 		t.Errorf("unexpected ErrCallbackQueueFull message: %s", ErrCallbackQueueFull.Error())
 	}
 }
