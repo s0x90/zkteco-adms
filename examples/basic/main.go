@@ -10,11 +10,40 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	zkdevicesync "github.com/s0x90/zkteco-sync"
 )
+
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logMiddleware logs each HTTP request with method, path, remote address,
+// response status code, and duration.
+func logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"status", rec.status,
+			"duration", time.Since(start),
+		)
+	})
+}
 
 func main() {
 	// Create a new ADMS server with functional options
@@ -69,10 +98,10 @@ func main() {
 	}
 
 	// Set up HTTP routes
-	http.Handle("/iclock/", server)
+	http.Handle("/iclock/", logMiddleware(server))
 
 	// Add a status endpoint to view connected devices
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/status", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		devices := server.ListDevices()
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
@@ -84,10 +113,10 @@ func main() {
 			fmt.Fprintf(w, "Options: %v\n", device.Options)
 			fmt.Fprintln(w, "---")
 		}
-	})
+	})))
 
 	// Add a command endpoint to send commands to devices
-	http.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/command", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -106,7 +135,7 @@ func main() {
 			return
 		}
 		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
-	})
+	})))
 
 	// Start the server
 	addr := ":8080"

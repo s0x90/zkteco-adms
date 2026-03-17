@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -20,6 +21,34 @@ import (
 	// Uncomment when using actual database
 	// _ "github.com/lib/pq"
 )
+
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logMiddleware logs each HTTP request with method, path, remote address,
+// response status code, and duration.
+func logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		slog.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"status", rec.status,
+			"duration", time.Since(start),
+		)
+	})
+}
 
 // AttendanceStore demonstrates how to integrate with a database.
 type AttendanceStore struct {
@@ -144,10 +173,10 @@ func main() {
 	defer server.Close()
 
 	// Set up HTTP routes
-	http.Handle("/iclock/", server)
+	http.Handle("/iclock/", logMiddleware(server))
 
 	// API endpoint to query attendance records
-	http.HandleFunc("/api/attendance", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/api/attendance", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
 		w.Header().Set("Content-Type", "application/json")
 
@@ -181,10 +210,10 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding attendance response: %v", err)
 		}
-	})
+	})))
 
 	// API endpoint to get daily summary
-	http.HandleFunc("/api/summary/today", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/api/summary/today", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
@@ -209,7 +238,7 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding summary response: %v", err)
 		}
-	})
+	})))
 
 	addr := ":8080"
 	log.Printf("Server with database integration starting on %s\n", addr)
