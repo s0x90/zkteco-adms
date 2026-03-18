@@ -12,6 +12,9 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
@@ -88,7 +91,9 @@ func main() {
 			fmt.Println("---")
 		}),
 	)
-	defer server.Close()
+	// server.Close() is called explicitly after graceful HTTP shutdown
+	// (see bottom of main) so that the callback queue is fully drained
+	// before the process exits.
 
 	// Register some known devices (optional).
 	// RegisterDevice returns an error for invalid serial numbers or
@@ -99,11 +104,13 @@ func main() {
 		}
 	}
 
-	// Set up HTTP routes
-	http.Handle("/iclock/", logMiddleware(server))
+	// Set up HTTP routes using a dedicated mux so we can pass it to
+	// http.Server (instead of the global DefaultServeMux).
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
 
 	// Add a status endpoint to view connected devices
-	http.Handle("/status", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/status", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		devices := server.ListDevices()
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
@@ -118,7 +125,7 @@ func main() {
 	})))
 
 	// Add a command endpoint to send commands to devices
-	http.Handle("/command", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/command", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -139,8 +146,25 @@ func main() {
 		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
 	})))
 
-	// Start the server
+	// Start the server with graceful shutdown support.
+	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,
+	// in-flight requests finish, and server.Close() drains the callback
+	// queue so no attendance records are silently lost.
 	addr := ":8080"
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-quit
+		log.Printf("received signal %v, shutting down...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}()
+
 	fmt.Printf("ZKTeco iClock Server starting on %s\n", addr)
 	fmt.Println("Endpoints:")
 	fmt.Println("  /iclock/cdata      - Attendance data endpoint")
@@ -152,7 +176,12 @@ func main() {
 	fmt.Println("  /command           - Send commands to devices (POST)")
 	fmt.Println()
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+
+	// Drain the ADMS callback queue so pending attendance records are
+	// processed before the process exits.
+	server.Close()
+	log.Println("server stopped")
 }

@@ -14,7 +14,10 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
@@ -172,13 +175,17 @@ func main() {
 			log.Printf("Device %s info updated: %v", sn, info)
 		}),
 	)
-	defer server.Close()
+	// server.Close() is called explicitly after graceful HTTP shutdown
+	// (see bottom of main) so that the callback queue is fully drained
+	// before the process exits.
 
-	// Set up HTTP routes
-	http.Handle("/iclock/", logMiddleware(server))
+	// Set up HTTP routes using a dedicated mux so we can pass it to
+	// http.Server (instead of the global DefaultServeMux).
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
 
 	// API endpoint to query attendance records
-	http.Handle("/api/attendance", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/attendance", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
 		w.Header().Set("Content-Type", "application/json")
 
@@ -215,7 +222,7 @@ func main() {
 	})))
 
 	// API endpoint to get daily summary
-	http.Handle("/api/summary/today", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/summary/today", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
@@ -242,16 +249,39 @@ func main() {
 		}
 	})))
 
+	// Start the server with graceful shutdown support.
+	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,
+	// in-flight requests finish, and server.Close() drains the callback
+	// queue so no attendance records are silently lost.
 	addr := ":8080"
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-quit
+		log.Printf("received signal %v, shutting down...", sig)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("Server with database integration starting on %s\n", addr)
 	log.Println("Endpoints:")
 	log.Println("  /iclock/*            - ZKTeco device endpoints")
 	log.Println("  /api/attendance      - Query attendance records")
 	log.Println("  /api/summary/today   - Get today's attendance summary")
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+
+	// Drain the ADMS callback queue so pending attendance records are
+	// processed before the process exits.
+	server.Close()
+	log.Println("server stopped")
 }
 
 // Example of how to use with an actual database (PostgreSQL):

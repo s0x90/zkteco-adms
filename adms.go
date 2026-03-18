@@ -942,6 +942,15 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			continue
 		}
 
+		// TODO(timezone): time.Parse returns timestamps without a timezone
+		// (effectively UTC), but ZKTeco devices report timestamps in their
+		// configured local time. For any deployment where devices are not set
+		// to UTC this produces silently wrong timestamps — e.g. a 09:00 local
+		// check-in is stored as 09:00 UTC instead of the correct UTC offset.
+		// This affects payroll, compliance reports, and any cross-timezone
+		// logic. A future WithDeviceTimezone(*time.Location) option should
+		// switch this call to time.ParseInLocation so the server can
+		// interpret device-local timestamps correctly.
 		var ts time.Time
 		if parsed, err := time.Parse(timestampFormat, parts[attFieldTimestamp]); err == nil {
 			ts = parsed
