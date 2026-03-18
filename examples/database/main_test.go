@@ -208,7 +208,7 @@ func TestAttendanceStore_GetRecordsByDateRange_Empty(t *testing.T) {
 	}
 }
 
-// ---------- /api/attendance endpoint tests ----------
+// ---------- helpers ----------
 
 func seedStore(t *testing.T, store *AttendanceStore, records ...zkadms.AttendanceRecord) {
 	t.Helper()
@@ -219,43 +219,10 @@ func seedStore(t *testing.T, store *AttendanceStore, records ...zkadms.Attendanc
 	}
 }
 
-func attendanceHandler(store *AttendanceStore) http.Handler {
-	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID := r.URL.Query().Get("user_id")
-		w.Header().Set("Content-Type", "application/json")
+// ---------- attendanceHandler tests ----------
+// These call the real attendanceHandler() from main.go.
 
-		var resp attendanceResponse
-		if userID != "" {
-			records := store.GetRecordsByUser(userID)
-			resp.UserID = userID
-			resp.Count = len(records)
-			resp.Records = make([]attendanceEntry, len(records))
-			for i, rec := range records {
-				resp.Records[i] = attendanceEntry{
-					Timestamp: rec.Timestamp.Format(time.RFC3339),
-					Status:    rec.Status,
-					Device:    rec.SerialNumber,
-				}
-			}
-		} else {
-			records := store.GetRecords()
-			resp.Total = len(records)
-			resp.Records = make([]attendanceEntry, len(records))
-			for i, rec := range records {
-				resp.Records[i] = attendanceEntry{
-					UserID:    rec.UserID,
-					Timestamp: rec.Timestamp.Format(time.RFC3339),
-					Status:    rec.Status,
-					Device:    rec.SerialNumber,
-				}
-			}
-		}
-
-		json.NewEncoder(w).Encode(resp)
-	}))
-}
-
-func TestAttendanceEndpoint_EmptyStore(t *testing.T) {
+func TestAttendanceHandler_EmptyStore(t *testing.T) {
 	store := NewAttendanceStore()
 	handler := attendanceHandler(store)
 
@@ -283,7 +250,7 @@ func TestAttendanceEndpoint_EmptyStore(t *testing.T) {
 	}
 }
 
-func TestAttendanceEndpoint_AllRecords(t *testing.T) {
+func TestAttendanceHandler_AllRecords(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
@@ -314,7 +281,7 @@ func TestAttendanceEndpoint_AllRecords(t *testing.T) {
 	}
 }
 
-func TestAttendanceEndpoint_FilterByUser(t *testing.T) {
+func TestAttendanceHandler_FilterByUser(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
@@ -341,7 +308,7 @@ func TestAttendanceEndpoint_FilterByUser(t *testing.T) {
 	if len(resp.Records) != 2 {
 		t.Errorf("expected 2 records, got %d", len(resp.Records))
 	}
-	// Filtered records should NOT have UserID set (matches original handler behavior).
+	// Filtered records should NOT have UserID set (matches handler behavior).
 	for i, rec := range resp.Records {
 		if rec.UserID != "" {
 			t.Errorf("record %d: filtered records should omit UserID, got %q", i, rec.UserID)
@@ -349,7 +316,7 @@ func TestAttendanceEndpoint_FilterByUser(t *testing.T) {
 	}
 }
 
-func TestAttendanceEndpoint_FilterByUnknownUser(t *testing.T) {
+func TestAttendanceHandler_FilterByUnknownUser(t *testing.T) {
 	store := NewAttendanceStore()
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
@@ -373,36 +340,47 @@ func TestAttendanceEndpoint_FilterByUnknownUser(t *testing.T) {
 	}
 }
 
-// ---------- /api/summary/today endpoint tests ----------
+func TestAttendanceHandler_RecordFields(t *testing.T) {
+	store := NewAttendanceStore()
+	ts := time.Date(2026, 3, 17, 14, 30, 0, 0, time.UTC)
+	seedStore(t, store,
+		zkadms.AttendanceRecord{
+			UserID: "U1", Timestamp: ts, Status: 1,
+			SerialNumber: "DEV-MAIN", VerifyMode: 3, WorkCode: "WC1",
+		},
+	)
 
-func summaryHandler(store *AttendanceStore) http.Handler {
-	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		now := time.Now()
-		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		endOfDay := startOfDay.Add(24 * time.Hour)
+	handler := attendanceHandler(store)
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 
-		records := store.GetRecordsByDateRange(startOfDay, endOfDay)
-
-		resp := summaryResponse{
-			Date:    startOfDay.Format("2006-01-02"),
-			Count:   len(records),
-			Records: make([]attendanceEntry, len(records)),
-		}
-		for i, rec := range records {
-			resp.Records[i] = attendanceEntry{
-				UserID:    rec.UserID,
-				Timestamp: rec.Timestamp.Format(time.RFC3339),
-				Status:    rec.Status,
-				Device:    rec.SerialNumber,
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	var resp attendanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(resp.Records))
+	}
+	rec := resp.Records[0]
+	if rec.UserID != "U1" {
+		t.Errorf("expected UserID U1, got %q", rec.UserID)
+	}
+	if rec.Status != 1 {
+		t.Errorf("expected Status 1, got %d", rec.Status)
+	}
+	if rec.Device != "DEV-MAIN" {
+		t.Errorf("expected Device DEV-MAIN, got %q", rec.Device)
+	}
+	if rec.Timestamp != "2026-03-17T14:30:00Z" {
+		t.Errorf("expected Timestamp 2026-03-17T14:30:00Z, got %q", rec.Timestamp)
+	}
 }
 
-func TestSummaryEndpoint_EmptyStore(t *testing.T) {
+// ---------- summaryHandler tests ----------
+// These call the real summaryHandler() from main.go.
+
+func TestSummaryHandler_EmptyStore(t *testing.T) {
 	store := NewAttendanceStore()
 	handler := summaryHandler(store)
 
@@ -428,7 +406,7 @@ func TestSummaryEndpoint_EmptyStore(t *testing.T) {
 	}
 }
 
-func TestSummaryEndpoint_OnlyTodayRecords(t *testing.T) {
+func TestSummaryHandler_OnlyTodayRecords(t *testing.T) {
 	store := NewAttendanceStore()
 	now := time.Now()
 
@@ -472,7 +450,7 @@ func TestSummaryEndpoint_OnlyTodayRecords(t *testing.T) {
 	}
 }
 
-func TestSummaryEndpoint_ContentType(t *testing.T) {
+func TestSummaryHandler_ContentType(t *testing.T) {
 	store := NewAttendanceStore()
 	handler := summaryHandler(store)
 
@@ -486,7 +464,7 @@ func TestSummaryEndpoint_ContentType(t *testing.T) {
 	}
 }
 
-func TestSummaryEndpoint_ValidJSON(t *testing.T) {
+func TestSummaryHandler_ValidJSON(t *testing.T) {
 	store := NewAttendanceStore()
 	now := time.Now()
 	seedStore(t, store,
@@ -521,5 +499,124 @@ func TestSummaryEndpoint_ValidJSON(t *testing.T) {
 		if rec.Device == "" {
 			t.Errorf("record %d: expected non-empty Device", i)
 		}
+	}
+}
+
+func TestSummaryHandler_RecordDate(t *testing.T) {
+	store := NewAttendanceStore()
+	handler := summaryHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	var resp summaryResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Date should be parseable and match today.
+	parsed, err := time.Parse("2006-01-02", resp.Date)
+	if err != nil {
+		t.Fatalf("date %q not in expected format: %v", resp.Date, err)
+	}
+	now := time.Now()
+	if parsed.Year() != now.Year() || parsed.Month() != now.Month() || parsed.Day() != now.Day() {
+		t.Errorf("expected today's date, got %s", resp.Date)
+	}
+}
+
+// ---------- newMux routing tests ----------
+// Exercises the real newMux() which wires everything together.
+
+func newTestMux(t *testing.T) (*http.ServeMux, *AttendanceStore) {
+	t.Helper()
+	store := NewAttendanceStore()
+	server := zkadms.NewADMSServer()
+	t.Cleanup(func() { server.Close() })
+	return newMux(server, store), store
+}
+
+func TestNewMux_AttendanceRoute(t *testing.T) {
+	mux, store := newTestMux(t)
+	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
+	seedStore(t, store,
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, SerialNumber: "D1"},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/attendance, got %d", w.Code)
+	}
+
+	var resp attendanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Errorf("expected total 1, got %d", resp.Total)
+	}
+}
+
+func TestNewMux_SummaryRoute(t *testing.T) {
+	mux, _ := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/summary/today, got %d", w.Code)
+	}
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("expected application/json, got %q", w.Header().Get("Content-Type"))
+	}
+}
+
+func TestNewMux_IClockRoute(t *testing.T) {
+	mux, _ := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// The important thing is that the route is matched (not 404).
+	if w.Code == http.StatusNotFound {
+		t.Error("/iclock/cdata should be handled by ADMS server, not 404")
+	}
+}
+
+func TestNewMux_UnknownRoute(t *testing.T) {
+	mux, _ := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown route, got %d", w.Code)
+	}
+}
+
+func TestNewMux_LogsRequests(t *testing.T) {
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+
+	mux, _ := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "http request") {
+		t.Errorf("expected log output from logMiddleware; got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "path=/api/attendance") {
+		t.Errorf("expected path=/api/attendance in log; got: %s", logOutput)
 	}
 }

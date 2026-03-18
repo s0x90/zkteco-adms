@@ -157,35 +157,11 @@ type summaryResponse struct {
 	Records []attendanceEntry `json:"records"`
 }
 
-func main() {
-	// Initialize the attendance store
-	store := NewAttendanceStore()
-
-	// Create the ADMS server with functional options
-	server := zkadms.NewADMSServer(
-		// Save attendance records to the store
-		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
-			if err := store.SaveAttendance(record); err != nil {
-				log.Printf("Error saving attendance: %v", err)
-			}
-		}),
-
-		// Log device info updates
-		zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
-			log.Printf("Device %s info updated: %v", sn, info)
-		}),
-	)
-	// server.Close() is called explicitly after graceful HTTP shutdown
-	// (see bottom of main) so that the callback queue is fully drained
-	// before the process exits.
-
-	// Set up HTTP routes using a dedicated mux so we can pass it to
-	// http.Server (instead of the global DefaultServeMux).
-	mux := http.NewServeMux()
-	mux.Handle("/iclock/", logMiddleware(server))
-
-	// API endpoint to query attendance records
-	mux.Handle("/api/attendance", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// attendanceHandler returns an http.Handler that responds with JSON
+// attendance records. If the "user_id" query parameter is set, only
+// records for that user are returned; otherwise all records are returned.
+func attendanceHandler(store *AttendanceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
 		w.Header().Set("Content-Type", "application/json")
 
@@ -219,10 +195,13 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding attendance response: %v", err)
 		}
-	})))
+	})
+}
 
-	// API endpoint to get daily summary
-	mux.Handle("/api/summary/today", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// summaryHandler returns an http.Handler that responds with a JSON daily
+// summary of today's attendance records.
+func summaryHandler(store *AttendanceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
@@ -247,7 +226,42 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding summary response: %v", err)
 		}
-	})))
+	})
+}
+
+// newMux builds the HTTP mux with all routes wired up to the given ADMS
+// server and attendance store.
+func newMux(server *zkadms.ADMSServer, store *AttendanceStore) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
+	mux.Handle("/api/attendance", logMiddleware(attendanceHandler(store)))
+	mux.Handle("/api/summary/today", logMiddleware(summaryHandler(store)))
+	return mux
+}
+
+func main() {
+	// Initialize the attendance store
+	store := NewAttendanceStore()
+
+	// Create the ADMS server with functional options
+	server := zkadms.NewADMSServer(
+		// Save attendance records to the store
+		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
+			if err := store.SaveAttendance(record); err != nil {
+				log.Printf("Error saving attendance: %v", err)
+			}
+		}),
+
+		// Log device info updates
+		zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+			log.Printf("Device %s info updated: %v", sn, info)
+		}),
+	)
+	// server.Close() is called explicitly after graceful HTTP shutdown
+	// (see bottom of main) so that the callback queue is fully drained
+	// before the process exits.
+
+	mux := newMux(server, store)
 
 	// Start the server with graceful shutdown support.
 	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,

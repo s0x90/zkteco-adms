@@ -50,6 +50,58 @@ func logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// statusHandler returns an http.Handler that lists registered devices and
+// their online/offline status.
+func statusHandler(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		devices := server.ListDevices()
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
+		for _, device := range devices {
+			online := server.IsDeviceOnline(device.SerialNumber)
+			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
+			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
+			fmt.Fprintf(w, "Online: %t\n", online)
+			fmt.Fprintf(w, "Options: %v\n", device.Options)
+			fmt.Fprintln(w, "---")
+		}
+	})
+}
+
+// commandHandler returns an http.Handler that accepts POST requests to queue
+// commands for a specific device identified by "sn" and "cmd" query params.
+func commandHandler(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		sn := r.URL.Query().Get("sn")
+		cmd := r.URL.Query().Get("cmd")
+
+		if sn == "" || cmd == "" {
+			http.Error(w, "Missing sn or cmd parameter", http.StatusBadRequest)
+			return
+		}
+
+		if err := server.QueueCommand(sn, cmd); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
+	})
+}
+
+// newMux builds the HTTP mux with all routes wired up to the given ADMS server.
+func newMux(server *zkadms.ADMSServer) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
+	mux.Handle("/status", logMiddleware(statusHandler(server)))
+	mux.Handle("/command", logMiddleware(commandHandler(server)))
+	return mux
+}
+
 func main() {
 	// Create a new ADMS server with functional options
 	server := zkadms.NewADMSServer(
@@ -104,47 +156,7 @@ func main() {
 		}
 	}
 
-	// Set up HTTP routes using a dedicated mux so we can pass it to
-	// http.Server (instead of the global DefaultServeMux).
-	mux := http.NewServeMux()
-	mux.Handle("/iclock/", logMiddleware(server))
-
-	// Add a status endpoint to view connected devices
-	mux.Handle("/status", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		devices := server.ListDevices()
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
-		for _, device := range devices {
-			online := server.IsDeviceOnline(device.SerialNumber)
-			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
-			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
-			fmt.Fprintf(w, "Online: %t\n", online)
-			fmt.Fprintf(w, "Options: %v\n", device.Options)
-			fmt.Fprintln(w, "---")
-		}
-	})))
-
-	// Add a command endpoint to send commands to devices
-	mux.Handle("/command", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		sn := r.URL.Query().Get("sn")
-		cmd := r.URL.Query().Get("cmd")
-
-		if sn == "" || cmd == "" {
-			http.Error(w, "Missing sn or cmd parameter", http.StatusBadRequest)
-			return
-		}
-
-		if err := server.QueueCommand(sn, cmd); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
-	})))
+	mux := newMux(server)
 
 	// Start the server with graceful shutdown support.
 	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,

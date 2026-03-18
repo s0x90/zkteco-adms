@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
 )
@@ -121,7 +120,7 @@ func TestLogMiddleware_PreservesResponseBody(t *testing.T) {
 	}
 }
 
-// ---------- /status endpoint tests ----------
+// ---------- helpers ----------
 
 func newTestServer(t *testing.T, devices ...string) *zkadms.ADMSServer {
 	t.Helper()
@@ -135,23 +134,10 @@ func newTestServer(t *testing.T, devices ...string) *zkadms.ADMSServer {
 	return server
 }
 
-func statusHandler(server *zkadms.ADMSServer) http.Handler {
-	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		devices := server.ListDevices()
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
-		for _, device := range devices {
-			online := server.IsDeviceOnline(device.SerialNumber)
-			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
-			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
-			fmt.Fprintf(w, "Online: %t\n", online)
-			fmt.Fprintf(w, "Options: %v\n", device.Options)
-			fmt.Fprintln(w, "---")
-		}
-	}))
-}
+// ---------- statusHandler tests ----------
+// These call the real statusHandler() from main.go.
 
-func TestStatusEndpoint_NoDevices(t *testing.T) {
+func TestStatusHandler_NoDevices(t *testing.T) {
 	server := newTestServer(t)
 	handler := statusHandler(server)
 
@@ -167,7 +153,7 @@ func TestStatusEndpoint_NoDevices(t *testing.T) {
 	}
 }
 
-func TestStatusEndpoint_WithDevices(t *testing.T) {
+func TestStatusHandler_WithDevices(t *testing.T) {
 	server := newTestServer(t, "DEV001", "DEV002")
 	handler := statusHandler(server)
 
@@ -183,15 +169,14 @@ func TestStatusEndpoint_WithDevices(t *testing.T) {
 	if !strings.Contains(body, "Connected Devices: 2") {
 		t.Errorf("expected 2 connected devices; body: %s", body)
 	}
-	if !strings.Contains(body, "DEV001") {
-		t.Errorf("expected DEV001 in body; body: %s", body)
-	}
-	if !strings.Contains(body, "DEV002") {
-		t.Errorf("expected DEV002 in body; body: %s", body)
+	for _, sn := range []string{"DEV001", "DEV002"} {
+		if !strings.Contains(body, sn) {
+			t.Errorf("expected %s in body; body: %s", sn, body)
+		}
 	}
 }
 
-func TestStatusEndpoint_ContentType(t *testing.T) {
+func TestStatusHandler_ContentType(t *testing.T) {
 	server := newTestServer(t)
 	handler := statusHandler(server)
 
@@ -205,32 +190,40 @@ func TestStatusEndpoint_ContentType(t *testing.T) {
 	}
 }
 
-// ---------- /command endpoint tests ----------
+func TestStatusHandler_ShowsOnlineStatus(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+	handler := statusHandler(server)
 
-func commandHandler(server *zkadms.ADMSServer) http.Handler {
-	return logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 
-		sn := r.URL.Query().Get("sn")
-		cmd := r.URL.Query().Get("cmd")
-
-		if sn == "" || cmd == "" {
-			http.Error(w, "Missing sn or cmd parameter", http.StatusBadRequest)
-			return
-		}
-
-		if err := server.QueueCommand(sn, cmd); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
-	}))
+	body := w.Body.String()
+	// Freshly registered devices show as online (LastActivity is set
+	// at registration time) depending on the OnlineThreshold.
+	if !strings.Contains(body, "Online:") {
+		t.Errorf("expected Online field in output; body: %s", body)
+	}
 }
 
-func TestCommandEndpoint_MethodNotAllowed(t *testing.T) {
+func TestStatusHandler_ShowsLastActivity(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+	handler := statusHandler(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Last Activity:") {
+		t.Errorf("expected Last Activity field; body: %s", body)
+	}
+}
+
+// ---------- commandHandler tests ----------
+// These call the real commandHandler() from main.go.
+
+func TestCommandHandler_MethodNotAllowed(t *testing.T) {
 	server := newTestServer(t)
 	handler := commandHandler(server)
 
@@ -247,7 +240,7 @@ func TestCommandEndpoint_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestCommandEndpoint_MissingParams(t *testing.T) {
+func TestCommandHandler_MissingParams(t *testing.T) {
 	server := newTestServer(t, "DEV001")
 	handler := commandHandler(server)
 
@@ -274,7 +267,7 @@ func TestCommandEndpoint_MissingParams(t *testing.T) {
 	}
 }
 
-func TestCommandEndpoint_Success(t *testing.T) {
+func TestCommandHandler_Success(t *testing.T) {
 	server := newTestServer(t, "DEV001")
 	handler := commandHandler(server)
 
@@ -285,10 +278,190 @@ func TestCommandEndpoint_Success(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "Command queued") {
-		t.Errorf("expected success message; body: %s", w.Body.String())
+	body := w.Body.String()
+	if !strings.Contains(body, "Command queued") {
+		t.Errorf("expected success message; body: %s", body)
 	}
-	if !strings.Contains(w.Body.String(), "DEV001") {
-		t.Errorf("expected device serial in response; body: %s", w.Body.String())
+	if !strings.Contains(body, "DEV001") {
+		t.Errorf("expected device serial in response; body: %s", body)
+	}
+	if !strings.Contains(body, "REBOOT") {
+		t.Errorf("expected command in response; body: %s", body)
+	}
+}
+
+func TestCommandHandler_UnknownDevice(t *testing.T) {
+	server := newTestServer(t) // no devices registered
+	handler := commandHandler(server)
+
+	// QueueCommand succeeds even for unknown serials (it just queues
+	// the command for later pickup), so we expect 200.
+	req := httptest.NewRequest(http.MethodPost, "/command?sn=NOSUCH&cmd=REBOOT", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for unknown device (queue accepts it), got %d", w.Code)
+	}
+}
+
+func TestCommandHandler_QueueFull(t *testing.T) {
+	// Create a server with a very small command queue.
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := commandHandler(server)
+
+	// Fill the queue.
+	req := httptest.NewRequest(http.MethodPost, "/command?sn=DEV001&cmd=CMD1", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first command should succeed, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Second command should fail with 503.
+	req = httptest.NewRequest(http.MethodPost, "/command?sn=DEV001&cmd=CMD2", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when queue is full, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------- newMux routing tests ----------
+// Exercises the real newMux() which wires everything together.
+
+func TestNewMux_StatusRoute(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /status, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Connected Devices:") {
+		t.Errorf("expected device list in /status response; body: %s", w.Body.String())
+	}
+}
+
+func TestNewMux_CommandRoute(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/command?sn=DEV001&cmd=INFO", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for POST /command, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Command queued") {
+		t.Errorf("expected queued message; body: %s", w.Body.String())
+	}
+}
+
+func TestNewMux_IClockRoute(t *testing.T) {
+	server := newTestServer(t)
+	mux := newMux(server)
+
+	// The ADMS server handles /iclock/* paths. A bare GET with no
+	// serial number should still reach the handler (which returns an
+	// error status, not a 404 from the mux).
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// We don't assert on the exact status; the important thing is
+	// that the route was matched (i.e. not a 404 from mux).
+	if w.Code == http.StatusNotFound {
+		t.Error("/iclock/cdata should be handled by the ADMS server, not 404")
+	}
+}
+
+func TestNewMux_UnknownRoute(t *testing.T) {
+	server := newTestServer(t)
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown route, got %d", w.Code)
+	}
+}
+
+// ---------- integration: mux with logMiddleware ----------
+
+func TestNewMux_LogsRequests(t *testing.T) {
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+
+	server := newTestServer(t)
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "http request") {
+		t.Errorf("expected log output from logMiddleware; got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "path=/status") {
+		t.Errorf("expected path=/status in log; got: %s", logOutput)
+	}
+}
+
+// ---------- edge cases ----------
+
+func TestStatusHandler_ManyDevices(t *testing.T) {
+	// Register more than a handful of devices to ensure all are listed.
+	sns := make([]string, 10)
+	for i := range sns {
+		sns[i] = fmt.Sprintf("DEV%03d", i)
+	}
+	server := newTestServer(t, sns...)
+	handler := statusHandler(server)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if !strings.Contains(body, "Connected Devices: 10") {
+		t.Errorf("expected 10 devices; body: %s", body)
+	}
+	for _, sn := range sns {
+		if !strings.Contains(body, sn) {
+			t.Errorf("expected %s in body", sn)
+		}
+	}
+}
+
+func TestCommandHandler_SpecialCharsInCommand(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+	handler := commandHandler(server)
+
+	// Commands may contain special characters; ensure they pass through.
+	// URL-encode the command to avoid malformed request.
+	req := httptest.NewRequest(http.MethodPost,
+		"/command?sn=DEV001&cmd=DATA+UPDATE+tablename", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "DATA UPDATE tablename") {
+		t.Errorf("expected command echoed in response; body: %s", w.Body.String())
 	}
 }
