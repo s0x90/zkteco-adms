@@ -102,7 +102,7 @@ func newMux(server *zkadms.ADMSServer) *http.ServeMux {
 }
 
 // run creates the ADMS server, wires HTTP routes, and blocks until ctx is
-// cancelled. On cancellation the HTTP server is gracefully shut down and
+// canceled. On cancellation the HTTP server is gracefully shut down and
 // the ADMS callback queue is drained before returning.
 func run(ctx context.Context, addr string) error {
 	// Create a new ADMS server with functional options
