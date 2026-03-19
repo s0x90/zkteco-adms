@@ -14,7 +14,6 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -239,7 +238,10 @@ func newMux(server *zkadms.ADMSServer, store *AttendanceStore) *http.ServeMux {
 	return mux
 }
 
-func main() {
+// run creates the attendance store and ADMS server, wires HTTP routes, and
+// blocks until ctx is cancelled. On cancellation the HTTP server is gracefully
+// shut down and the ADMS callback queue is drained before returning.
+func run(ctx context.Context, addr string) error {
 	// Initialize the attendance store
 	store := NewAttendanceStore()
 
@@ -257,27 +259,19 @@ func main() {
 			log.Printf("Device %s info updated: %v", sn, info)
 		}),
 	)
-	// server.Close() is called explicitly after graceful HTTP shutdown
-	// (see bottom of main) so that the callback queue is fully drained
-	// before the process exits.
+	defer server.Close()
 
 	mux := newMux(server, store)
 
-	// Start the server with graceful shutdown support.
-	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,
-	// in-flight requests finish, and server.Close() drains the callback
-	// queue so no attendance records are silently lost.
-	addr := ":8080"
 	srv := &http.Server{Addr: addr, Handler: mux}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// Shutdown goroutine: wait for context cancellation, then gracefully
+	// stop the HTTP server so in-flight requests can finish.
 	go func() {
-		sig := <-quit
-		log.Printf("received signal %v, shutting down...", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown error: %v", err)
 		}
 	}()
@@ -289,13 +283,19 @@ func main() {
 	log.Println("  /api/summary/today   - Get today's attendance summary")
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatal(err)
+		return err
 	}
 
-	// Drain the ADMS callback queue so pending attendance records are
-	// processed before the process exits.
-	server.Close()
 	log.Println("server stopped")
+	return nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, ":8080"); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // Example of how to use with an actual database (PostgreSQL):

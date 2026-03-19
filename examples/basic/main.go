@@ -12,7 +12,6 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -102,7 +101,10 @@ func newMux(server *zkadms.ADMSServer) *http.ServeMux {
 	return mux
 }
 
-func main() {
+// run creates the ADMS server, wires HTTP routes, and blocks until ctx is
+// cancelled. On cancellation the HTTP server is gracefully shut down and
+// the ADMS callback queue is drained before returning.
+func run(ctx context.Context, addr string) error {
 	// Create a new ADMS server with functional options
 	server := zkadms.NewADMSServer(
 		// Enable the /iclock/inspect debug endpoint.
@@ -143,36 +145,28 @@ func main() {
 			fmt.Println("---")
 		}),
 	)
-	// server.Close() is called explicitly after graceful HTTP shutdown
-	// (see bottom of main) so that the callback queue is fully drained
-	// before the process exits.
+	defer server.Close()
 
 	// Register some known devices (optional).
 	// RegisterDevice returns an error for invalid serial numbers or
 	// when the device limit (WithMaxDevices) has been reached.
 	for _, sn := range []string{"DEVICE001", "DEVICE002"} {
 		if err := server.RegisterDevice(sn); err != nil {
-			log.Fatalf("failed to register device %s: %v", sn, err)
+			return fmt.Errorf("register device %s: %w", sn, err)
 		}
 	}
 
 	mux := newMux(server)
 
-	// Start the server with graceful shutdown support.
-	// On SIGINT/SIGTERM the HTTP server stops accepting new connections,
-	// in-flight requests finish, and server.Close() drains the callback
-	// queue so no attendance records are silently lost.
-	addr := ":8080"
 	srv := &http.Server{Addr: addr, Handler: mux}
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// Shutdown goroutine: wait for context cancellation, then gracefully
+	// stop the HTTP server so in-flight requests can finish.
 	go func() {
-		sig := <-quit
-		log.Printf("received signal %v, shutting down...", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown error: %v", err)
 		}
 	}()
@@ -189,11 +183,17 @@ func main() {
 	fmt.Println()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatal(err)
+		return err
 	}
 
-	// Drain the ADMS callback queue so pending attendance records are
-	// processed before the process exits.
-	server.Close()
 	log.Println("server stopped")
+	return nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, ":8080"); err != nil {
+		log.Fatal(err)
+	}
 }

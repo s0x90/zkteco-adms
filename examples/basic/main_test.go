@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
 )
@@ -463,5 +465,40 @@ func TestCommandHandler_SpecialCharsInCommand(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "DATA UPDATE tablename") {
 		t.Errorf("expected command echoed in response; body: %s", w.Body.String())
+	}
+}
+
+// ---------- run() tests ----------
+
+func TestRun_StartsAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, ":0")
+	}()
+
+	// Give the server a moment to start listening.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after context cancellation")
+	}
+}
+
+func TestRun_InvalidAddr(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	// An obviously invalid address should make ListenAndServe fail immediately.
+	err := run(ctx, ":-1")
+	if err == nil {
+		t.Fatal("expected error for invalid address, got nil")
 	}
 }
