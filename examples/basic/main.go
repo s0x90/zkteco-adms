@@ -12,6 +12,8 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
@@ -47,7 +49,62 @@ func logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func main() {
+// statusHandler returns an http.Handler that lists registered devices and
+// their online/offline status.
+func statusHandler(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		devices := server.ListDevices()
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
+		for _, device := range devices {
+			online := server.IsDeviceOnline(device.SerialNumber)
+			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
+			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
+			fmt.Fprintf(w, "Online: %t\n", online)
+			fmt.Fprintf(w, "Options: %v\n", device.Options)
+			fmt.Fprintln(w, "---")
+		}
+	})
+}
+
+// commandHandler returns an http.Handler that accepts POST requests to queue
+// commands for a specific device identified by "sn" and "cmd" query params.
+func commandHandler(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		sn := r.URL.Query().Get("sn")
+		cmd := r.URL.Query().Get("cmd")
+
+		if sn == "" || cmd == "" {
+			http.Error(w, "Missing sn or cmd parameter", http.StatusBadRequest)
+			return
+		}
+
+		if err := server.QueueCommand(sn, cmd); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
+	})
+}
+
+// newMux builds the HTTP mux with all routes wired up to the given ADMS server.
+func newMux(server *zkadms.ADMSServer) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
+	mux.Handle("/status", logMiddleware(statusHandler(server)))
+	mux.Handle("/command", logMiddleware(commandHandler(server)))
+	return mux
+}
+
+// run creates the ADMS server, wires HTTP routes, and blocks until ctx is
+// canceled. On cancellation the HTTP server is gracefully shut down and
+// the ADMS callback queue is drained before returning.
+func run(ctx context.Context, addr string) error {
 	// Create a new ADMS server with functional options
 	server := zkadms.NewADMSServer(
 		// Enable the /iclock/inspect debug endpoint.
@@ -95,52 +152,25 @@ func main() {
 	// when the device limit (WithMaxDevices) has been reached.
 	for _, sn := range []string{"DEVICE001", "DEVICE002"} {
 		if err := server.RegisterDevice(sn); err != nil {
-			log.Fatalf("failed to register device %s: %v", sn, err)
+			return fmt.Errorf("register device %s: %w", sn, err)
 		}
 	}
 
-	// Set up HTTP routes
-	http.Handle("/iclock/", logMiddleware(server))
+	mux := newMux(server)
 
-	// Add a status endpoint to view connected devices
-	http.Handle("/status", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		devices := server.ListDevices()
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Connected Devices: %d\n\n", len(devices))
-		for _, device := range devices {
-			online := server.IsDeviceOnline(device.SerialNumber)
-			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
-			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
-			fmt.Fprintf(w, "Online: %t\n", online)
-			fmt.Fprintf(w, "Options: %v\n", device.Options)
-			fmt.Fprintln(w, "---")
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	// Shutdown goroutine: wait for context cancellation, then gracefully
+	// stop the HTTP server so in-flight requests can finish.
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
 		}
-	})))
+	}()
 
-	// Add a command endpoint to send commands to devices
-	http.Handle("/command", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		sn := r.URL.Query().Get("sn")
-		cmd := r.URL.Query().Get("cmd")
-
-		if sn == "" || cmd == "" {
-			http.Error(w, "Missing sn or cmd parameter", http.StatusBadRequest)
-			return
-		}
-
-		if err := server.QueueCommand(sn, cmd); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintf(w, "Command queued for device %s: %s\n", sn, cmd)
-	})))
-
-	// Start the server
-	addr := ":8080"
 	fmt.Printf("ZKTeco iClock Server starting on %s\n", addr)
 	fmt.Println("Endpoints:")
 	fmt.Println("  /iclock/cdata      - Attendance data endpoint")
@@ -152,7 +182,18 @@ func main() {
 	fmt.Println("  /command           - Send commands to devices (POST)")
 	fmt.Println()
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+
+	log.Println("server stopped")
+	return nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, ":8080"); err != nil {
 		log.Fatal(err)
 	}
 }

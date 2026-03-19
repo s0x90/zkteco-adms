@@ -14,7 +14,9 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
@@ -154,31 +156,11 @@ type summaryResponse struct {
 	Records []attendanceEntry `json:"records"`
 }
 
-func main() {
-	// Initialize the attendance store
-	store := NewAttendanceStore()
-
-	// Create the ADMS server with functional options
-	server := zkadms.NewADMSServer(
-		// Save attendance records to the store
-		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
-			if err := store.SaveAttendance(record); err != nil {
-				log.Printf("Error saving attendance: %v", err)
-			}
-		}),
-
-		// Log device info updates
-		zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
-			log.Printf("Device %s info updated: %v", sn, info)
-		}),
-	)
-	defer server.Close()
-
-	// Set up HTTP routes
-	http.Handle("/iclock/", logMiddleware(server))
-
-	// API endpoint to query attendance records
-	http.Handle("/api/attendance", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// attendanceHandler returns an http.Handler that responds with JSON
+// attendance records. If the "user_id" query parameter is set, only
+// records for that user are returned; otherwise all records are returned.
+func attendanceHandler(store *AttendanceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
 		w.Header().Set("Content-Type", "application/json")
 
@@ -212,10 +194,13 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding attendance response: %v", err)
 		}
-	})))
+	})
+}
 
-	// API endpoint to get daily summary
-	http.Handle("/api/summary/today", logMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// summaryHandler returns an http.Handler that responds with a JSON daily
+// summary of today's attendance records.
+func summaryHandler(store *AttendanceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
@@ -240,16 +225,75 @@ func main() {
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding summary response: %v", err)
 		}
-	})))
+	})
+}
 
-	addr := ":8080"
+// newMux builds the HTTP mux with all routes wired up to the given ADMS
+// server and attendance store.
+func newMux(server *zkadms.ADMSServer, store *AttendanceStore) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/iclock/", logMiddleware(server))
+	mux.Handle("/api/attendance", logMiddleware(attendanceHandler(store)))
+	mux.Handle("/api/summary/today", logMiddleware(summaryHandler(store)))
+	return mux
+}
+
+// run creates the attendance store and ADMS server, wires HTTP routes, and
+// blocks until ctx is canceled. On cancellation the HTTP server is gracefully
+// shut down and the ADMS callback queue is drained before returning.
+func run(ctx context.Context, addr string) error {
+	// Initialize the attendance store
+	store := NewAttendanceStore()
+
+	// Create the ADMS server with functional options
+	server := zkadms.NewADMSServer(
+		// Save attendance records to the store
+		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
+			if err := store.SaveAttendance(record); err != nil {
+				log.Printf("Error saving attendance: %v", err)
+			}
+		}),
+
+		// Log device info updates
+		zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]string) {
+			log.Printf("Device %s info updated: %v", sn, info)
+		}),
+	)
+	defer server.Close()
+
+	mux := newMux(server, store)
+
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	// Shutdown goroutine: wait for context cancellation, then gracefully
+	// stop the HTTP server so in-flight requests can finish.
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("Server with database integration starting on %s\n", addr)
 	log.Println("Endpoints:")
 	log.Println("  /iclock/*            - ZKTeco device endpoints")
 	log.Println("  /api/attendance      - Query attendance records")
 	log.Println("  /api/summary/today   - Get today's attendance summary")
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+
+	log.Println("server stopped")
+	return nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, ":8080"); err != nil {
 		log.Fatal(err)
 	}
 }
