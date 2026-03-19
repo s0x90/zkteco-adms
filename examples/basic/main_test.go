@@ -61,8 +61,9 @@ func TestStatusRecorder_MultipleWriteHeader(t *testing.T) {
 
 func TestLogMiddleware_LogsRequest(t *testing.T) {
 	var buf bytes.Buffer
+	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
@@ -84,8 +85,9 @@ func TestLogMiddleware_LogsRequest(t *testing.T) {
 
 func TestLogMiddleware_DefaultStatusOK(t *testing.T) {
 	var buf bytes.Buffer
+	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok")) // no explicit WriteHeader
@@ -404,8 +406,9 @@ func TestNewMux_UnknownRoute(t *testing.T) {
 
 func TestNewMux_LogsRequests(t *testing.T) {
 	var buf bytes.Buffer
+	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	t.Cleanup(func() { slog.SetDefault(slog.Default()) })
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	server := newTestServer(t)
 	mux := newMux(server)
