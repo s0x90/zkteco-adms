@@ -365,6 +365,7 @@ func handleListDevices(server *zkadms.ADMSServer) http.Handler {
 				LastActivity: d.LastActivity.Format(time.RFC3339),
 				Online:       server.IsDeviceOnline(d.SerialNumber),
 				Options:      d.Options,
+				PendingCmds:  server.PendingCommandsCount(d.SerialNumber),
 			}
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -384,6 +385,7 @@ func handleDeviceDetail(server *zkadms.ADMSServer) http.Handler {
 			LastActivity: d.LastActivity.Format(time.RFC3339),
 			Online:       server.IsDeviceOnline(sn),
 			Options:      d.Options,
+			PendingCmds:  server.PendingCommandsCount(sn),
 		}
 		writeJSON(w, http.StatusOK, entry)
 	})

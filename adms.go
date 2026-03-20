@@ -875,6 +875,14 @@ func (s *ADMSServer) DrainCommands(serialNumber string) []string {
 	return commands
 }
 
+// PendingCommandsCount returns the number of queued commands for a device
+// without modifying the queue.
+func (s *ADMSServer) PendingCommandsCount(serialNumber string) int {
+	s.queueMutex.RLock()
+	defer s.queueMutex.RUnlock()
+	return len(s.commandQueue[serialNumber])
+}
+
 // GetCommands retrieves and removes pending commands for a device.
 //
 // Deprecated: Use [ADMSServer.DrainCommands] instead. GetCommands is

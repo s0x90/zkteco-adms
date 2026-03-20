@@ -680,9 +680,23 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 		errCh <- run(ctx, addr)
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-
+	// Wait for server to start using a readiness loop instead of a fixed sleep.
 	base := "http://" + addr
+	{
+		client := http.Client{Timeout: 500 * time.Millisecond}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("server did not become ready within timeout")
+			}
+			resp, err := client.Get(base + "/api/attendance")
+			if err == nil {
+				resp.Body.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 
 	// 1. Send attendance data — triggers WithOnAttendance callback which
 	//    calls store.SaveAttendance.

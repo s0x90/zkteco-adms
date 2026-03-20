@@ -1614,6 +1614,32 @@ func TestGetCommands_BackwardCompat(t *testing.T) {
 	}
 }
 
+func TestPendingCommandsCount(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	// Zero for unknown device.
+	if n := server.PendingCommandsCount("NODEV"); n != 0 {
+		t.Errorf("expected 0 pending commands for unknown device, got %d", n)
+	}
+
+	// Queue a few commands and verify count without draining.
+	for _, cmd := range []string{"INFO", "CHECK", "REBOOT"} {
+		if err := server.QueueCommand("COUNT001", cmd); err != nil {
+			t.Fatalf("QueueCommand(%q) failed: %v", cmd, err)
+		}
+	}
+	if n := server.PendingCommandsCount("COUNT001"); n != 3 {
+		t.Errorf("expected 3 pending commands, got %d", n)
+	}
+
+	// Drain one command and verify count decreases.
+	_ = server.DrainCommands("COUNT001")
+	if n := server.PendingCommandsCount("COUNT001"); n != 0 {
+		t.Errorf("expected 0 pending commands after drain, got %d", n)
+	}
+}
+
 func TestFunctionalOption_OverridesDeprecatedField(t *testing.T) {
 	// When both the deprecated field and functional option are set,
 	// the functional option should take precedence.

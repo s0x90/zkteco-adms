@@ -96,7 +96,8 @@ func statusString(status int) string {
 
 ```go
 // Defaults: slog.Default() logger, 10 MB body limit, 256 callback buffer,
-// 2-minute online threshold, 1-second dispatch timeout.
+// 2-minute online threshold, 1-second dispatch timeout, 1000 max devices,
+// 24h device eviction timeout.
 server := zkadms.NewADMSServer()
 defer server.Close()
 ```
@@ -128,8 +129,11 @@ defer server.Close()
 | `WithOnlineThreshold` | 2 min | Duration before a device is considered offline |
 | `WithDispatchTimeout` | 1 sec | Max block time when callback queue is full |
 | `WithBaseContext` | `context.Background()` | Parent context for callbacks |
-| `WithMaxDevices` | 0 (unlimited) | Max registered devices; returns `ErrMaxDevicesReached` |
+| `WithMaxDevices` | 1000 | Max registered devices; use `WithUnlimitedDevices()` to remove the cap |
+| `WithUnlimitedDevices` | — | Remove the device registration limit (use with caution) |
 | `WithMaxCommandsPerDevice` | 0 (unlimited) | Max queued commands per device; returns `ErrCommandQueueFull` |
+| `WithDeviceEvictionInterval` | 5 min | How often the eviction worker checks for stale devices |
+| `WithDeviceEvictionTimeout` | 24 hours | Inactivity duration before a device is automatically evicted |
 | `WithEnableInspect` | disabled | Enable the `/iclock/inspect` debug endpoint |
 | `WithOnAttendance` | nil | Attendance record callback |
 | `WithOnDeviceInfo` | nil | Device info callback |
@@ -397,8 +401,11 @@ Creates a new ADMS server instance configured with the given options.
 | `WithOnlineThreshold(time.Duration)` | Set device online threshold |
 | `WithDispatchTimeout(time.Duration)` | Set callback dispatch timeout |
 | `WithBaseContext(context.Context)` | Set parent context |
-| `WithMaxDevices(int)` | Set max registered devices |
+| `WithMaxDevices(int)` | Set max registered devices (default 1000) |
+| `WithUnlimitedDevices()` | Remove the device registration limit |
 | `WithMaxCommandsPerDevice(int)` | Set max command queue depth per device |
+| `WithDeviceEvictionInterval(time.Duration)` | Set stale-device check interval |
+| `WithDeviceEvictionTimeout(time.Duration)` | Set inactivity threshold for eviction |
 | `WithEnableInspect()` | Enable `/iclock/inspect` in ServeHTTP router |
 | `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
 | `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
@@ -414,6 +421,7 @@ Creates a new ADMS server instance configured with the given options.
 | `IsDeviceOnline(serialNumber string) bool` | Check if a device is online |
 | `QueueCommand(serialNumber, command string) error` | Queue a command; respects per-device limit |
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
+| `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
 | `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
 | `SendDataCommand(serialNumber, table, data string) error` | Queue a DATA QUERY command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
