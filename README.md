@@ -54,7 +54,7 @@ import (
 func main() {
     server := zkadms.NewADMSServer(
         zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
-            fmt.Printf("User %s checked %s at %s from device %s\n",
+            fmt.Printf("User %s status: %s at %s from device %s\n",
                 record.UserID,
                 statusString(record.Status),
                 record.Timestamp.Format(time.RFC3339),
