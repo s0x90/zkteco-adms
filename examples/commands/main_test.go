@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -762,5 +763,361 @@ func TestMultipleCommandsQueued(t *testing.T) {
 	cmds := server.DrainCommands("DEV001")
 	if len(cmds) != 4 {
 		t.Errorf("expected 4 queued commands, got %d: %v", len(cmds), cmds)
+	}
+}
+
+// ---------- device not found tests for all command handlers ----------
+
+func TestSyncTime_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/sync-time", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	var resp apiError
+	decodeResponse(t, w, &resp)
+	if !strings.Contains(resp.Error, "NOSUCH") {
+		t.Errorf("expected error mentioning NOSUCH; got: %s", resp.Error)
+	}
+}
+
+func TestClearData_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/clear-data", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestClearLog_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/clear-log", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestDeleteUser_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	body := deleteUserRequest{PIN: "1001"}
+	req := postJSON(t, "/api/devices/NOSUCH/users/delete", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestDeleteUser_InvalidJSON(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/users/delete",
+		strings.NewReader("not json"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid JSON, got %d", w.Code)
+	}
+}
+
+func TestOpenDoor_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/open-door", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestRawCommand_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	body := rawCommandRequest{Command: "REBOOT"}
+	req := postJSON(t, "/api/devices/NOSUCH/command", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestInfo_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/info", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// ---------- queue full tests for remaining handlers ----------
+
+func TestSyncTime_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	// Fill the queue.
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/sync-time", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first command should succeed, got %d", w.Code)
+	}
+
+	// Second should fail.
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/sync-time", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when queue full, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestClearData_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/clear-data", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/clear-data", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestClearLog_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/clear-log", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/clear-log", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestDeleteUser_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	body := deleteUserRequest{PIN: "1001"}
+	req := postJSON(t, "/api/devices/DEV001/users/delete", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	body = deleteUserRequest{PIN: "1002"}
+	req = postJSON(t, "/api/devices/DEV001/users/delete", body)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestOpenDoor_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/open-door", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/open-door", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestRawCommand_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	body := rawCommandRequest{Command: "CMD1"}
+	req := postJSON(t, "/api/devices/DEV001/command", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	body = rawCommandRequest{Command: "CMD2"}
+	req = postJSON(t, "/api/devices/DEV001/command", body)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+// ---------- run() lifecycle tests with devices ----------
+
+func TestRun_WithDevices(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, ":0", []string{"DEV001", "DEV002"})
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after context cancellation")
+	}
+}
+
+func TestRun_WithEmptyDeviceStrings(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, ":0", []string{"DEV001", "", "  ", "DEV002"})
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s")
+	}
+}
+
+// TestRun_ExercisesCallbacks starts the server via run() and sends simulated
+// ADMS device traffic to exercise the device-info and attendance callbacks.
+func TestRun_ExercisesCallbacks(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, addr, []string{"DEV001"})
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	base := "http://" + addr
+
+	// Send attendance data — triggers WithOnAttendance callback.
+	attendanceData := "USER001\t2026-03-20 09:00:00\t0\t1\t0\tWC1"
+	resp, err := http.Post(base+"/iclock/cdata?SN=DEV001&table=ATTLOG",
+		"text/plain", strings.NewReader(attendanceData))
+	if err != nil {
+		t.Fatalf("POST attendance failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Send device info — triggers WithOnDeviceInfo callback.
+	infoData := "FWVersion=Ver 6.60\nDeviceName=ZK-F22"
+	resp, err = http.Post(base+"/iclock/cdata?SN=DEV001",
+		"text/plain", strings.NewReader(infoData))
+	if err != nil {
+		t.Fatalf("POST device info failed: %v", err)
+	}
+	resp.Body.Close()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s")
 	}
 }
