@@ -97,7 +97,7 @@ PIN=1002    DateTime=2025-09-02 14:35:54    Verified=1    Status=0
 PIN = user ID
 DateTime = timestamp of check-in/out
 Verified = verification mode (0=password, 1=fingerprint, 4=card, 15=face, 25=palm, etc.)
-Status = check type (0=check-in, 1=check-out, etc.)
+Status = check type (0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=Overtime In, 5=Overtime Out)
 ```
 
 Server Response

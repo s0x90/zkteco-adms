@@ -73,9 +73,17 @@ func main() {
 func statusString(status int) string {
     switch status {
     case 0:
-        return "in"
+        return "check-in"
     case 1:
-        return "out"
+        return "check-out"
+    case 2:
+        return "break-out"
+    case 3:
+        return "break-in"
+    case 4:
+        return "overtime-in"
+    case 5:
+        return "overtime-out"
     default:
         return "unknown"
     }
@@ -133,7 +141,7 @@ defer server.Close()
 zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
     // record.UserID       - Employee ID
     // record.Timestamp    - Time of attendance
-    // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In
+    // record.Status       - 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=Overtime In, 5=Overtime Out
     // record.VerifyMode   - Verification method; use zkadms.VerifyModeName(record.VerifyMode) for label
     // record.WorkCode     - Optional work code
     // record.SerialNumber - Device serial number

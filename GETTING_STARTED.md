@@ -78,7 +78,7 @@ Each attendance record contains:
 type AttendanceRecord struct {
     UserID       string    // Employee ID (e.g., "123")
     Timestamp    time.Time // When the attendance occurred
-    Status       int       // 0=Check In, 1=Check Out
+    Status       int       // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=Overtime In, 5=Overtime Out
     VerifyMode   int       // Verification method; see VerifyMode* constants and VerifyModeName(mode)
     WorkCode     string    // Optional work code
     SerialNumber string    // Device that recorded this
@@ -114,10 +114,19 @@ Note: the `ctx` passed to your callback is derived from the server's base contex
 ```go
 server := zkadms.NewADMSServer(
     zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
-        if record.Status == 0 { // Check In
+        switch record.Status {
+        case 0: // Check In
             sendWelcomeNotification(ctx, record.UserID)
-        } else if record.Status == 1 { // Check Out
+        case 1: // Check Out
             sendGoodbyeNotification(ctx, record.UserID)
+        case 2: // Break Out
+            sendBreakNotification(ctx, record.UserID, "started")
+        case 3: // Break In
+            sendBreakNotification(ctx, record.UserID, "ended")
+        case 4: // Overtime In
+            sendOvertimeNotification(ctx, record.UserID, "started")
+        case 5: // Overtime Out
+            sendOvertimeNotification(ctx, record.UserID, "ended")
         }
     }),
 )
