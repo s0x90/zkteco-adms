@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -656,5 +658,171 @@ func TestRun_InvalidAddr(t *testing.T) {
 	err := run(ctx, ":-1")
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
+	}
+}
+
+// TestRun_ExercisesCallbacks starts the server via run() and sends simulated
+// ADMS device traffic to exercise the attendance and device-info callbacks
+// wired inside run().
+func TestRun_ExercisesCallbacks(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, addr)
+	}()
+
+	// Wait for server to start using a readiness loop instead of a fixed sleep.
+	base := "http://" + addr
+	{
+		client := http.Client{Timeout: 500 * time.Millisecond}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("server did not become ready within timeout")
+			}
+			resp, err := client.Get(base + "/api/attendance")
+			if err == nil {
+				resp.Body.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// 1. Send attendance data — triggers WithOnAttendance callback which
+	//    calls store.SaveAttendance.
+	attendanceData := "USER001\t2026-03-20 09:00:00\t0\t1\t0\tWC1"
+	resp, err := http.Post(base+"/iclock/cdata?SN=TEST001&table=ATTLOG",
+		"text/plain", strings.NewReader(attendanceData))
+	if err != nil {
+		t.Fatalf("POST attendance failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for attendance POST, got %d", resp.StatusCode)
+	}
+
+	// 2. Send device info — triggers WithOnDeviceInfo callback.
+	infoData := "FWVersion=Ver 6.60\nDeviceName=ZK-F22"
+	resp, err = http.Post(base+"/iclock/cdata?SN=TEST001",
+		"text/plain", strings.NewReader(infoData))
+	if err != nil {
+		t.Fatalf("POST device info failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Give callbacks time to be processed.
+	time.Sleep(200 * time.Millisecond)
+
+	// 3. Verify the attendance record was stored via the API.
+	resp, err = http.Get(base + "/api/attendance")
+	if err != nil {
+		t.Fatalf("GET /api/attendance failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var attResp attendanceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&attResp); err != nil {
+		t.Fatalf("failed to decode attendance response: %v", err)
+	}
+	if attResp.Total != 1 {
+		t.Errorf("expected 1 attendance record stored via callback, got %d", attResp.Total)
+	}
+
+	// 4. Verify today's summary shows the record.
+	resp, err = http.Get(base + "/api/summary/today")
+	if err != nil {
+		t.Fatalf("GET /api/summary/today failed: %v", err)
+	}
+	resp.Body.Close()
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after context cancellation")
+	}
+}
+
+// ---------- concurrent access test ----------
+
+func TestAttendanceStore_ConcurrentAccess(t *testing.T) {
+	store := NewAttendanceStore()
+	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
+
+	// Write from multiple goroutines.
+	done := make(chan struct{})
+	for i := range 10 {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			for j := range 10 {
+				_ = store.SaveAttendance(zkadms.AttendanceRecord{
+					UserID:       fmt.Sprintf("USER%d", id),
+					Timestamp:    ts.Add(time.Duration(j) * time.Minute),
+					SerialNumber: "DEV001",
+				})
+			}
+		}(i)
+	}
+	for range 10 {
+		<-done
+	}
+
+	records := store.GetRecords()
+	if len(records) != 100 {
+		t.Errorf("expected 100 records, got %d", len(records))
+	}
+}
+
+// ---------- attendanceHandler additional tests ----------
+
+func TestAttendanceHandler_MultipleUsers(t *testing.T) {
+	store := NewAttendanceStore()
+	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
+	seedStore(t, store,
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U2", Timestamp: ts, Status: 0, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "U3", Timestamp: ts, Status: 0, SerialNumber: "D2"},
+		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts.Add(8 * time.Hour), Status: 1, SerialNumber: "D1"},
+	)
+
+	handler := attendanceHandler(store)
+
+	// Filter by U1 — should get 2 records.
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance?user_id=U1", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	var resp attendanceResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 2 {
+		t.Errorf("expected 2 records for U1, got %d", resp.Count)
+	}
+
+	// All records — should get 4.
+	req = httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 4 {
+		t.Errorf("expected 4 total records, got %d", resp.Total)
 	}
 }
