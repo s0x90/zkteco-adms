@@ -316,7 +316,7 @@ func (d *Device) copy() *Device {
 type AttendanceRecord struct {
 	UserID       string
 	Timestamp    time.Time
-	Status       int // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, etc.
+	Status       int // 0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=Overtime In, 5=Overtime Out
 	VerifyMode   int // Verification method; see VerifyMode* constants and [VerifyModeName].
 	WorkCode     string
 	SerialNumber string

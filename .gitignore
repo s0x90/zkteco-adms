@@ -34,3 +34,5 @@ Thumbs.db
 /bin/
 /dist/
 /build/
+/basic
+/database
