@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -503,5 +504,148 @@ func TestRun_InvalidAddr(t *testing.T) {
 	err := run(ctx, ":-1")
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
+	}
+}
+
+// TestRun_ExercisesCallbacks starts the server via run() and sends simulated
+// ADMS device traffic to exercise the attendance, device-info, and registry
+// callbacks wired inside run().
+func TestRun_ExercisesCallbacks(t *testing.T) {
+	// Use a listener so we know the actual port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // free the port for run()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, addr)
+	}()
+
+	// Wait for server to start using a readiness loop instead of a fixed sleep.
+	base := "http://" + addr
+	{
+		client := http.Client{Timeout: 500 * time.Millisecond}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("server did not become ready within timeout")
+			}
+			resp, err := client.Get(base + "/status")
+			if err == nil {
+				resp.Body.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// 1. Send attendance data — triggers WithOnAttendance callback.
+	attendanceData := "USER001\t2026-03-20 09:00:00\t0\t1\t0\tWC1"
+	resp, err := http.Post(base+"/iclock/cdata?SN=DEVICE001&table=ATTLOG",
+		"text/plain", strings.NewReader(attendanceData))
+	if err != nil {
+		t.Fatalf("POST attendance failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for attendance POST, got %d", resp.StatusCode)
+	}
+
+	// 2. Send device info — triggers WithOnDeviceInfo callback.
+	infoData := "FWVersion=Ver 6.60\nDeviceName=ZK-F22"
+	resp, err = http.Post(base+"/iclock/cdata?SN=DEVICE001",
+		"text/plain", strings.NewReader(infoData))
+	if err != nil {
+		t.Fatalf("POST device info failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// 3. Send registry data — triggers WithOnRegistry callback.
+	//    Registry body uses comma-separated key=value pairs.
+	registryData := "UserCount=50,FPCount=100,AttCount=5000,FWVersion=Ver 6.60,IPAddress=192.168.1.201"
+	resp, err = http.Post(base+"/iclock/registry?SN=DEVICE001",
+		"text/plain", strings.NewReader(registryData))
+	if err != nil {
+		t.Fatalf("POST registry failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// 4. Verify /status shows the devices.
+	resp, err = http.Get(base + "/status")
+	if err != nil {
+		t.Fatalf("GET /status failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for /status, got %d", resp.StatusCode)
+	}
+
+	// Give callbacks time to be processed.
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after context cancellation")
+	}
+}
+
+// TestRun_RegistryCallbackManyEntries exercises the registry callback's
+// truncation logic (shown >= 8 break).
+func TestRun_RegistryCallbackManyEntries(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, addr)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	base := "http://" + addr
+
+	// Send registry data with more than 8 key-value pairs to trigger the break.
+	// Registry body uses comma-separated key=value pairs.
+	parts := make([]string, 0, 15)
+	for i := range 15 {
+		parts = append(parts, fmt.Sprintf("Key%d=Value%d", i, i))
+	}
+	registryData := strings.Join(parts, ",")
+	resp, err := http.Post(base+"/iclock/registry?SN=DEVICE001",
+		"text/plain", strings.NewReader(registryData))
+	if err != nil {
+		t.Fatalf("POST registry failed: %v", err)
+	}
+	resp.Body.Close()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s")
 	}
 }

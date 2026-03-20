@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1613,6 +1614,32 @@ func TestGetCommands_BackwardCompat(t *testing.T) {
 	}
 }
 
+func TestPendingCommandsCount(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	// Zero for unknown device.
+	if n := server.PendingCommandsCount("NODEV"); n != 0 {
+		t.Errorf("expected 0 pending commands for unknown device, got %d", n)
+	}
+
+	// Queue a few commands and verify count without draining.
+	for _, cmd := range []string{"INFO", "CHECK", "REBOOT"} {
+		if err := server.QueueCommand("COUNT001", cmd); err != nil {
+			t.Fatalf("QueueCommand(%q) failed: %v", cmd, err)
+		}
+	}
+	if n := server.PendingCommandsCount("COUNT001"); n != 3 {
+		t.Errorf("expected 3 pending commands, got %d", n)
+	}
+
+	// Drain one command and verify count decreases.
+	_ = server.DrainCommands("COUNT001")
+	if n := server.PendingCommandsCount("COUNT001"); n != 0 {
+		t.Errorf("expected 0 pending commands after drain, got %d", n)
+	}
+}
+
 func TestFunctionalOption_OverridesDeprecatedField(t *testing.T) {
 	// When both the deprecated field and functional option are set,
 	// the functional option should take precedence.
@@ -1663,6 +1690,15 @@ func TestNewADMSServer_Defaults(t *testing.T) {
 	}
 	if cap(server.callbackCh) != defaultCallbackBufferSize {
 		t.Errorf("expected default callbackCh capacity %d, got %d", defaultCallbackBufferSize, cap(server.callbackCh))
+	}
+	if server.maxDevices != defaultMaxDevices {
+		t.Errorf("expected default maxDevices %d, got %d", defaultMaxDevices, server.maxDevices)
+	}
+	if server.deviceEvictionInterval != defaultDeviceEvictionInterval {
+		t.Errorf("expected default deviceEvictionInterval %v, got %v", defaultDeviceEvictionInterval, server.deviceEvictionInterval)
+	}
+	if server.deviceEvictionTimeout != defaultDeviceEvictionTimeout {
+		t.Errorf("expected default deviceEvictionTimeout %v, got %v", defaultDeviceEvictionTimeout, server.deviceEvictionTimeout)
 	}
 }
 
@@ -1840,8 +1876,8 @@ func TestWithMaxDevices_NegativeIgnored(t *testing.T) {
 	server := NewADMSServer(WithMaxDevices(-5))
 	defer server.Close()
 
-	if server.maxDevices != 0 {
-		t.Errorf("expected negative to be ignored (0), got %d", server.maxDevices)
+	if server.maxDevices != defaultMaxDevices {
+		t.Errorf("expected negative to be ignored (default %d), got %d", defaultMaxDevices, server.maxDevices)
 	}
 }
 
@@ -2031,5 +2067,165 @@ func TestRegisterDevice_Idempotent(t *testing.T) {
 	devices := server.ListDevices()
 	if len(devices) != 1 {
 		t.Errorf("expected 1 device after duplicate register, got %d", len(devices))
+	}
+}
+
+// --- Eviction worker tests ---
+
+func TestEvictionWorker_RemovesStaleDevices(t *testing.T) {
+	server := NewADMSServer(
+		WithDeviceEvictionInterval(50*time.Millisecond),
+		WithDeviceEvictionTimeout(100*time.Millisecond),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("STALE01"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Backdate the device's LastActivity so it appears stale.
+	server.devicesMutex.Lock()
+	server.devices["STALE01"].LastActivity = time.Now().Add(-time.Hour)
+	server.devicesMutex.Unlock()
+
+	// Wait long enough for at least one eviction cycle.
+	time.Sleep(200 * time.Millisecond)
+
+	if d := server.GetDevice("STALE01"); d != nil {
+		t.Error("expected stale device to be evicted, but it still exists")
+	}
+}
+
+func TestEvictionWorker_KeepsActiveDevices(t *testing.T) {
+	server := NewADMSServer(
+		WithDeviceEvictionInterval(50*time.Millisecond),
+		WithDeviceEvictionTimeout(10*time.Second),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("ACTIVE01"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Wait for a few eviction cycles.
+	time.Sleep(200 * time.Millisecond)
+
+	if d := server.GetDevice("ACTIVE01"); d == nil {
+		t.Error("expected active device to survive eviction, but it was removed")
+	}
+}
+
+func TestEvictionWorker_CleansCommandQueue(t *testing.T) {
+	server := NewADMSServer(
+		WithDeviceEvictionInterval(50*time.Millisecond),
+		WithDeviceEvictionTimeout(100*time.Millisecond),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("CMDDEV01"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+	if err := server.QueueCommand("CMDDEV01", "REBOOT"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
+
+	// Backdate so device is stale.
+	server.devicesMutex.Lock()
+	server.devices["CMDDEV01"].LastActivity = time.Now().Add(-time.Hour)
+	server.devicesMutex.Unlock()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Device should be gone.
+	if d := server.GetDevice("CMDDEV01"); d != nil {
+		t.Error("expected stale device to be evicted")
+	}
+	// Command queue should be cleaned up.
+	cmds := server.DrainCommands("CMDDEV01")
+	if len(cmds) != 0 {
+		t.Errorf("expected empty command queue after eviction, got %d commands", len(cmds))
+	}
+}
+
+func TestEvictionWorker_StopsOnClose(t *testing.T) {
+	server := NewADMSServer(
+		WithDeviceEvictionInterval(10*time.Millisecond),
+		WithDeviceEvictionTimeout(time.Hour),
+	)
+
+	// Close should return promptly, meaning the eviction worker exited.
+	done := make(chan struct{})
+	go func() {
+		server.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success: Close returned.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2 seconds; eviction worker may be stuck")
+	}
+}
+
+func TestWithDeviceEvictionInterval(t *testing.T) {
+	server := NewADMSServer(WithDeviceEvictionInterval(42 * time.Second))
+	defer server.Close()
+
+	if server.deviceEvictionInterval != 42*time.Second {
+		t.Errorf("expected 42s, got %v", server.deviceEvictionInterval)
+	}
+}
+
+func TestWithDeviceEvictionInterval_ZeroIgnored(t *testing.T) {
+	server := NewADMSServer(WithDeviceEvictionInterval(0))
+	defer server.Close()
+
+	if server.deviceEvictionInterval != defaultDeviceEvictionInterval {
+		t.Errorf("expected default %v, got %v", defaultDeviceEvictionInterval, server.deviceEvictionInterval)
+	}
+}
+
+func TestWithDeviceEvictionTimeout(t *testing.T) {
+	server := NewADMSServer(WithDeviceEvictionTimeout(12 * time.Hour))
+	defer server.Close()
+
+	if server.deviceEvictionTimeout != 12*time.Hour {
+		t.Errorf("expected 12h, got %v", server.deviceEvictionTimeout)
+	}
+}
+
+func TestWithDeviceEvictionTimeout_ZeroIgnored(t *testing.T) {
+	server := NewADMSServer(WithDeviceEvictionTimeout(0))
+	defer server.Close()
+
+	if server.deviceEvictionTimeout != defaultDeviceEvictionTimeout {
+		t.Errorf("expected default %v, got %v", defaultDeviceEvictionTimeout, server.deviceEvictionTimeout)
+	}
+}
+
+func TestWithUnlimitedDevices(t *testing.T) {
+	server := NewADMSServer(WithUnlimitedDevices())
+	defer server.Close()
+
+	if server.maxDevices != 0 {
+		t.Errorf("expected unlimited (0), got %d", server.maxDevices)
+	}
+
+	// Should accept many devices without error.
+	for i := range 50 {
+		sn := fmt.Sprintf("UNLIM%03d", i)
+		if err := server.RegisterDevice(sn); err != nil {
+			t.Fatalf("RegisterDevice(%s) failed: %v", sn, err)
+		}
+	}
+}
+
+func TestDefaultMaxDevices(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if server.maxDevices != 1000 {
+		t.Errorf("expected default maxDevices=1000, got %d", server.maxDevices)
 	}
 }

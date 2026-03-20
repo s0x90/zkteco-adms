@@ -54,6 +54,18 @@ const (
 	// when the callback channel is full before dropping the event.
 	defaultDispatchTimeout = 1 * time.Second
 
+	// defaultMaxDevices is the default maximum number of registered devices.
+	// Use [WithMaxDevices] to override or [WithUnlimitedDevices] to remove the cap.
+	defaultMaxDevices = 1000
+
+	// defaultDeviceEvictionInterval is how often the eviction worker checks for
+	// stale devices.
+	defaultDeviceEvictionInterval = 5 * time.Minute
+
+	// defaultDeviceEvictionTimeout is the inactivity duration after which a
+	// device is automatically evicted.
+	defaultDeviceEvictionTimeout = 24 * time.Hour
+
 	// maxSerialNumberLength is the maximum allowed length for a device serial number.
 	maxSerialNumberLength = 64
 
@@ -264,12 +276,22 @@ func WithBaseContext(ctx context.Context) Option {
 // WithMaxDevices sets the maximum number of devices that can be registered
 // simultaneously. When the limit is reached, new device registrations from
 // HTTP requests are rejected with 503 Service Unavailable.
-// A value of 0 (the default) means unlimited.
+// The default is 1000. Use [WithUnlimitedDevices] to remove the limit.
 func WithMaxDevices(n int) Option {
 	return func(s *ADMSServer) {
 		if n >= 0 {
 			s.maxDevices = n
 		}
+	}
+}
+
+// WithUnlimitedDevices removes the default device registration limit.
+// By default the server allows up to 1000 devices; this option sets the
+// limit to 0 (unlimited). Use with caution: without a limit, a flood of
+// requests with unique serial numbers can grow the device map without bound.
+func WithUnlimitedDevices() Option {
+	return func(s *ADMSServer) {
+		s.maxDevices = 0
 	}
 }
 
@@ -293,6 +315,30 @@ func WithMaxCommandsPerDevice(n int) Option {
 func WithEnableInspect() Option {
 	return func(s *ADMSServer) {
 		s.enableInspect = true
+	}
+}
+
+// WithDeviceEvictionInterval sets how often the background eviction worker
+// checks for stale devices. The default is 5 minutes. The eviction worker
+// removes devices that have been inactive longer than the eviction timeout
+// (see [WithDeviceEvictionTimeout]) and cleans up their command queues.
+func WithDeviceEvictionInterval(d time.Duration) Option {
+	return func(s *ADMSServer) {
+		if d > 0 {
+			s.deviceEvictionInterval = d
+		}
+	}
+}
+
+// WithDeviceEvictionTimeout sets the inactivity duration after which a
+// device is automatically removed by the background eviction worker.
+// The default is 24 hours. When a device is evicted, its pending command
+// queue is also cleaned up.
+func WithDeviceEvictionTimeout(d time.Duration) Option {
+	return func(s *ADMSServer) {
+		if d > 0 {
+			s.deviceEvictionTimeout = d
+		}
 	}
 }
 
@@ -380,12 +426,16 @@ type ADMSServer struct {
 	maxCommandsPerDevice int  // 0 = unlimited
 	enableInspect        bool // false = /iclock/inspect not routed in ServeHTTP
 
+	deviceEvictionInterval time.Duration // how often the eviction worker runs
+	deviceEvictionTimeout  time.Duration // inactivity threshold for eviction
+
 	baseCtx       context.Context
 	baseCtxCancel context.CancelFunc
 
 	callbackCh   chan func()
 	callbackMu   sync.RWMutex // guards callbackCh close in coordination with dispatchers
 	callbackDone chan struct{}
+	evictionDone chan struct{}
 	closeCh      chan struct{}
 	closeOnce    sync.Once
 }
@@ -403,15 +453,19 @@ type ADMSServer struct {
 // callbacks and stop the worker.
 func NewADMSServer(opts ...Option) *ADMSServer {
 	s := &ADMSServer{
-		devices:            make(map[string]*Device),
-		commandQueue:       make(map[string][]string),
-		logger:             slog.Default(),
-		maxBodySize:        defaultMaxBodySize,
-		callbackBufferSize: defaultCallbackBufferSize,
-		onlineThreshold:    defaultOnlineThreshold,
-		dispatchTimeout:    defaultDispatchTimeout,
-		callbackDone:       make(chan struct{}),
-		closeCh:            make(chan struct{}),
+		devices:                make(map[string]*Device),
+		commandQueue:           make(map[string][]string),
+		logger:                 slog.Default(),
+		maxBodySize:            defaultMaxBodySize,
+		maxDevices:             defaultMaxDevices,
+		callbackBufferSize:     defaultCallbackBufferSize,
+		onlineThreshold:        defaultOnlineThreshold,
+		dispatchTimeout:        defaultDispatchTimeout,
+		deviceEvictionInterval: defaultDeviceEvictionInterval,
+		deviceEvictionTimeout:  defaultDeviceEvictionTimeout,
+		callbackDone:           make(chan struct{}),
+		evictionDone:           make(chan struct{}),
+		closeCh:                make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -425,18 +479,23 @@ func NewADMSServer(opts ...Option) *ADMSServer {
 
 	s.callbackCh = make(chan func(), s.callbackBufferSize)
 	go s.callbackWorker()
+	go s.evictionWorker()
 	return s
 }
 
 // Close drains the callback queue and stops the worker goroutine.
-// It blocks until all pending callbacks have been executed.
+// It blocks until all pending callbacks have been executed and the
+// eviction worker has exited.
 // Close is safe to call multiple times.
 func (s *ADMSServer) Close() {
 	s.closeOnce.Do(func() {
 		// Cancel the base context so callbacks see cancellation.
 		s.baseCtxCancel()
-		// Signal all dispatchers to stop accepting new callbacks.
+		// Signal all dispatchers and the eviction worker to stop.
 		close(s.closeCh)
+		// Wait for the eviction worker to exit before tearing down the
+		// callback pipeline, so no late eviction log races with closure.
+		<-s.evictionDone
 		// Wait for any in-flight dispatchCallback calls to finish sending.
 		// RLock holders (dispatchers) will see closeCh and exit their select.
 		s.callbackMu.Lock()
@@ -466,6 +525,53 @@ func (s *ADMSServer) safeCall(fn func()) {
 		}
 	}()
 	fn()
+}
+
+// evictionWorker periodically removes devices that have been inactive longer
+// than the configured eviction timeout. It also cleans up pending commands for
+// evicted devices. The worker exits when closeCh is closed.
+func (s *ADMSServer) evictionWorker() {
+	defer close(s.evictionDone)
+	ticker := time.NewTicker(s.deviceEvictionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.closeCh:
+			return
+		case <-ticker.C:
+			s.evictStaleDevices()
+		}
+	}
+}
+
+// evictStaleDevices removes devices inactive longer than the eviction timeout
+// and cleans up their command queues. Lock ordering: devicesMutex first, then
+// queueMutex — never held simultaneously.
+func (s *ADMSServer) evictStaleDevices() {
+	// Phase 1: collect stale serial numbers under devicesMutex.
+	var stale []string
+	now := time.Now()
+	s.devicesMutex.Lock()
+	for sn, d := range s.devices {
+		if now.Sub(d.LastActivity) > s.deviceEvictionTimeout {
+			stale = append(stale, sn)
+			delete(s.devices, sn)
+		}
+	}
+	s.devicesMutex.Unlock()
+
+	if len(stale) == 0 {
+		return
+	}
+
+	// Phase 2: clean command queues under queueMutex.
+	s.queueMutex.Lock()
+	for _, sn := range stale {
+		delete(s.commandQueue, sn)
+	}
+	s.queueMutex.Unlock()
+
+	s.logger.Info("evicted stale devices", "count", len(stale))
 }
 
 // readBody reads the request body with a size limit enforced by http.MaxBytesReader.
@@ -767,6 +873,14 @@ func (s *ADMSServer) DrainCommands(serialNumber string) []string {
 	commands := s.commandQueue[serialNumber]
 	delete(s.commandQueue, serialNumber)
 	return commands
+}
+
+// PendingCommandsCount returns the number of queued commands for a device
+// without modifying the queue.
+func (s *ADMSServer) PendingCommandsCount(serialNumber string) int {
+	s.queueMutex.RLock()
+	defer s.queueMutex.RUnlock()
+	return len(s.commandQueue[serialNumber])
 }
 
 // GetCommands retrieves and removes pending commands for a device.
