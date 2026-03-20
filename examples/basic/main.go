@@ -118,7 +118,7 @@ func run(ctx context.Context, addr string) error {
 			fmt.Printf("  Device: %s\n", record.SerialNumber)
 			fmt.Printf("  User ID: %s\n", record.UserID)
 			fmt.Printf("  Timestamp: %s\n", record.Timestamp.Format(time.RFC3339))
-			fmt.Printf("  Status: %d (0=Check In, 1=Check Out)\n", record.Status)
+			fmt.Printf("  Status: %d (0=Check In, 1=Check Out, 2=Break Out, 3=Break In, 4=Overtime In, 5=Overtime Out)\n", record.Status)
 			fmt.Printf("  Verify Mode: %s (%d)\n", zkadms.VerifyModeName(record.VerifyMode), record.VerifyMode)
 			fmt.Printf("  Work Code: %s\n", record.WorkCode)
 			fmt.Println("---")
