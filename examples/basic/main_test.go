@@ -612,7 +612,7 @@ func TestRun_RegistryCallbackManyEntries(t *testing.T) {
 
 	// Send registry data with more than 8 key-value pairs to trigger the break.
 	// Registry body uses comma-separated key=value pairs.
-	var parts []string
+	parts := make([]string, 0, 15)
 	for i := range 15 {
 		parts = append(parts, fmt.Sprintf("Key%d=Value%d", i, i))
 	}
