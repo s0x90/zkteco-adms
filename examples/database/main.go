@@ -35,8 +35,8 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// logMiddleware logs each HTTP request with method, path, remote address,
-// response status code, and duration.
+// logMiddleware logs each HTTP request with method, path, query parameters,
+// remote address, headers, response status code, and duration.
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -45,7 +45,9 @@ func logMiddleware(next http.Handler) http.Handler {
 			slog.Info("http request",
 				"method", r.Method,
 				"path", r.URL.Path,
+				"query", r.URL.RawQuery,
 				"remote", r.RemoteAddr,
+				"headers", r.Header,
 				"status", rec.status,
 				"duration", time.Since(start),
 			)
