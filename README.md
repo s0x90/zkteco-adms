@@ -329,6 +329,7 @@ Use `zkadms.VerifyModeName(mode)` to resolve any value to a human-readable label
 See the [examples](./examples) directory for complete examples:
 
 - **[basic](./examples/basic)** - Simple server with status endpoint
+- **[commands](./examples/commands)** - Device command management via REST API
 - **[database](./examples/database)** - Integration with database storage
 
 ### Running Examples
