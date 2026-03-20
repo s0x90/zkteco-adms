@@ -1,6 +1,11 @@
 // Command basic demonstrates a minimal ZKTeco ADMS server with device
 // status and command-sending endpoints.
 //
+// SECURITY WARNING: This example does NOT include any authentication or
+// authorization. All endpoints (/status, /command) are publicly accessible.
+// In a production deployment you MUST add authentication middleware (e.g.
+// API keys, OAuth2, mTLS) before exposing these routes to a network.
+//
 // Run with:
 //
 //	go run ./examples/basic
@@ -98,6 +103,8 @@ func commandHandler(server *zkadms.ADMSServer) http.Handler {
 func newMux(server *zkadms.ADMSServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/iclock/", logMiddleware(server))
+	// WARNING: These routes have no authentication. Add auth middleware
+	// before deploying to production.
 	mux.Handle("/status", logMiddleware(statusHandler(server)))
 	mux.Handle("/command", logMiddleware(commandHandler(server)))
 	return mux

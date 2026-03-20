@@ -2,6 +2,14 @@
 // for sending management commands to devices (reboot, sync time, user
 // management, door control, etc.).
 //
+// SECURITY WARNING: This example does NOT include any authentication or
+// authorization. All API endpoints — including reboot, clear-data, open-door,
+// and user management — are publicly accessible. In a production deployment
+// you MUST add authentication middleware (e.g. API keys, OAuth2, mTLS)
+// before exposing these routes to a network. Unauthenticated access to these
+// endpoints can lead to data loss, unauthorized physical access, and device
+// compromise.
+//
 // Run with:
 //
 //	go run ./examples/commands -devices ABCD12345678,EFGH87654321
@@ -394,7 +402,9 @@ func newMux(server *zkadms.ADMSServer) *http.ServeMux {
 	mux.Handle("GET /api/devices", logMiddleware(handleListDevices(server)))
 	mux.Handle("GET /api/devices/{sn}", logMiddleware(handleDeviceDetail(server)))
 
-	// Command endpoints.
+	// WARNING: All command endpoints below have NO authentication.
+	// In production, wrap these with auth middleware to prevent unauthorized
+	// reboot, data wipe, door unlock, and user management operations.
 	mux.Handle("POST /api/devices/{sn}/reboot", logMiddleware(handleReboot(server)))
 	mux.Handle("POST /api/devices/{sn}/info", logMiddleware(handleInfo(server)))
 	mux.Handle("POST /api/devices/{sn}/sync-time", logMiddleware(handleSyncTime(server)))

@@ -2,6 +2,12 @@
 // attendance store and JSON query endpoints, modeled after a typical
 // database-backed integration.
 //
+// SECURITY WARNING: This example does NOT include any authentication or
+// authorization. The /api/attendance and /api/summary/today endpoints are
+// publicly accessible and expose employee attendance data. In a production
+// deployment you MUST add authentication middleware (e.g. API keys, OAuth2,
+// mTLS) before exposing these routes to a network.
+//
 // Run with:
 //
 //	go run ./examples/database
@@ -235,6 +241,8 @@ func summaryHandler(store *AttendanceStore) http.Handler {
 func newMux(server *zkadms.ADMSServer, store *AttendanceStore) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/iclock/", logMiddleware(server))
+	// WARNING: These routes have no authentication and expose attendance
+	// data. Add auth middleware before deploying to production.
 	mux.Handle("/api/attendance", logMiddleware(attendanceHandler(store)))
 	mux.Handle("/api/summary/today", logMiddleware(summaryHandler(store)))
 	return mux
