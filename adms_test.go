@@ -109,7 +109,7 @@ func TestQueueAndGetCommands(t *testing.T) {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
-	commands := server.GetCommands(serialNumber)
+	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 2 {
 		t.Errorf("Expected 2 commands, got %d", len(commands))
 	}
@@ -121,27 +121,27 @@ func TestQueueAndGetCommands(t *testing.T) {
 	}
 
 	// Queue should be cleared after retrieval
-	commands = server.GetCommands(serialNumber)
+	commands = server.DrainCommands(serialNumber)
 	if len(commands) != 0 {
 		t.Errorf("Expected empty queue after retrieval, got %d commands", len(commands))
 	}
 }
 
-func TestGetCommandsDeletesKey(t *testing.T) {
+func TestDrainCommandsDeletesKey(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
 	if err := server.QueueCommand("DEL001", "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
-	_ = server.GetCommands("DEL001")
+	_ = server.DrainCommands("DEL001")
 
 	server.queueMutex.RLock()
 	_, exists := server.commandQueue["DEL001"]
 	server.queueMutex.RUnlock()
 
 	if exists {
-		t.Error("Expected map key to be deleted after GetCommands, but it still exists")
+		t.Error("Expected map key to be deleted after DrainCommands, but it still exists")
 	}
 }
 
@@ -163,13 +163,13 @@ func TestHandleCData_MissingSN(t *testing.T) {
 }
 
 func TestHandleCData_AttendanceLog(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
-
 	received := make(chan AttendanceRecord, 1)
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			received <- record
+		}),
+	)
+	defer server.Close()
 
 	// Simulate attendance data
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
@@ -199,13 +199,13 @@ func TestHandleCData_AttendanceLog(t *testing.T) {
 }
 
 func TestHandleCData_MultipleAttendanceRecords(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
-
 	received := make(chan AttendanceRecord, 2)
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			received <- record
+		}),
+	)
+	defer server.Close()
 
 	// Multiple records
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0"
@@ -432,13 +432,13 @@ func TestHandleRegistry_PostParsesBody(t *testing.T) {
 }
 
 func TestHandleRegistry_Callback(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
-
 	received := make(chan map[string]string, 1)
-	server.OnRegistry = func(sn string, info map[string]string) {
-		received <- info
-	}
+	server := NewADMSServer(
+		WithOnRegistry(func(_ context.Context, sn string, info map[string]string) {
+			received <- info
+		}),
+	)
+	defer server.Close()
 
 	body := "DeviceType=acc"
 	req := httptest.NewRequest(http.MethodPost, "/iclock/registry?SN=REG002", bytes.NewBufferString(body))
@@ -451,7 +451,7 @@ func TestHandleRegistry_Callback(t *testing.T) {
 			t.Errorf("expected DeviceType=acc, got %s", info["DeviceType"])
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for OnRegistry callback")
+		t.Fatal("Timed out waiting for registry callback")
 	}
 }
 
@@ -515,11 +515,11 @@ func TestIsDeviceOnline(t *testing.T) {
 	}
 }
 
-func TestParseRegistryBody(t *testing.T) {
+func TestParseKVPairs_Registry(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	body := "Key1=Val1, ~Key2=Val2,~Key3=Val3"
-	info := server.parseRegistryBody(body)
+	info := server.parseKVPairs(body, ",", trimTildePrefix)
 	if info["Key1"] != "Val1" || info["Key2"] != "Val2" || info["Key3"] != "Val3" {
 		t.Errorf("unexpected parse result: %#v", info)
 	}
@@ -700,12 +700,12 @@ func TestParseAttendanceRecords(t *testing.T) {
 	}
 }
 
-func TestParseDeviceInfo(t *testing.T) {
+func TestParseKVPairs_DeviceInfo(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
 	data := "DeviceName=ZKDevice\nSerialNumber=TEST001\nFirmwareVersion=1.0.0"
-	info := server.parseDeviceInfo(data)
+	info := server.parseKVPairs(data, "\n", nil)
 
 	if info["DeviceName"] != "ZKDevice" {
 		t.Errorf("Expected DeviceName=ZKDevice, got %s", info["DeviceName"])
@@ -718,14 +718,16 @@ func TestParseDeviceInfo(t *testing.T) {
 	}
 }
 
-func TestSendCommand(t *testing.T) {
+func TestQueueCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	server.SendCommand(serialNumber, "INFO")
+	if err := server.QueueCommand(serialNumber, "INFO"); err != nil {
+		t.Fatalf("QueueCommand failed: %v", err)
+	}
 
-	commands := server.GetCommands(serialNumber)
+	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
@@ -743,7 +745,7 @@ func TestSendDataCommand(t *testing.T) {
 		t.Fatalf("SendDataCommand failed: %v", err)
 	}
 
-	commands := server.GetCommands(serialNumber)
+	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
@@ -764,7 +766,7 @@ func TestSendInfoCommand(t *testing.T) {
 		t.Fatalf("SendInfoCommand failed: %v", err)
 	}
 
-	commands := server.GetCommands(serialNumber)
+	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
@@ -875,21 +877,22 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// Verify commands were queued
-	commands := server.GetCommands(serialNumber)
+	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 10 {
 		t.Errorf("Expected 10 commands, got %d", len(commands))
 	}
 }
 
 func TestAttendanceRecordSerialNumber(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
 	serialNumber := "TEST001"
 
 	received := make(chan AttendanceRecord, 1)
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			received <- record
+		}),
+	)
+	defer server.Close()
 
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN="+serialNumber+"&table=ATTLOG", bytes.NewBufferString(attendanceData))
@@ -907,24 +910,21 @@ func TestAttendanceRecordSerialNumber(t *testing.T) {
 	}
 }
 
-func TestCallbackNilAfterEnqueue(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
-
+func TestCallbackStableAfterEnqueue(t *testing.T) {
 	received := make(chan AttendanceRecord, 1)
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			received <- record
+		}),
+	)
+	defer server.Close()
 
 	attendanceData := "123\t2024-01-01 08:00:00\t0\t1\t0"
 	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(attendanceData))
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
-	// Nil the callback after the request was handled (closure already enqueued).
-	// With the captured-local fix this must not panic.
-	server.OnAttendance = nil
-
+	// The callback was captured at construction; the enqueued closure must still execute.
 	select {
 	case rec := <-received:
 		if rec.UserID != "123" {
@@ -955,24 +955,27 @@ func TestDispatchAfterClose(t *testing.T) {
 }
 
 func TestCallbackPanicRecovery(t *testing.T) {
-	server := NewADMSServer()
+	received := make(chan string, 1)
+	var callCount atomic.Int64
+
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			n := callCount.Add(1)
+			if n == 1 {
+				panic("boom")
+			}
+			received <- record.UserID
+		}),
+	)
 	defer server.Close()
 
-	received := make(chan string, 1)
-
 	// First callback panics.
-	server.OnAttendance = func(record AttendanceRecord) {
-		panic("boom")
-	}
 	req1 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG",
 		bytes.NewBufferString("100\t2024-01-01 08:00:00\t0\t1\t0"))
 	w1 := httptest.NewRecorder()
 	server.HandleCData(w1, req1)
 
-	// Replace with a well-behaved callback.
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record.UserID
-	}
+	// Second callback should still work after panic recovery.
 	req2 := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG",
 		bytes.NewBufferString("200\t2024-01-01 09:00:00\t0\t1\t0"))
 	w2 := httptest.NewRecorder()
@@ -1011,21 +1014,21 @@ func BenchmarkParseAttendanceRecords(b *testing.B) {
 }
 
 func TestHandleCData_BatchDispatch(t *testing.T) {
-	server := NewADMSServer()
-	defer server.Close()
-
 	var mu sync.Mutex
 	var received []AttendanceRecord
 	done := make(chan struct{})
 
-	server.OnAttendance = func(record AttendanceRecord) {
-		mu.Lock()
-		received = append(received, record)
-		if len(received) == 3 {
-			close(done)
-		}
-		mu.Unlock()
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			mu.Lock()
+			received = append(received, record)
+			if len(received) == 3 {
+				close(done)
+			}
+			mu.Unlock()
+		}),
+	)
+	defer server.Close()
 
 	// Send 3 records in a single POST — they should arrive via a single batch dispatch.
 	data := "100\t2024-01-01 08:00:00\t0\t1\t0\n200\t2024-01-01 09:00:00\t1\t1\t0\n300\t2024-01-01 10:00:00\t0\t2\t0"
@@ -1057,7 +1060,9 @@ func TestHandleCData_BatchDispatch(t *testing.T) {
 }
 
 func TestHandleCData_QueueFull_Returns503(t *testing.T) {
-	server := NewADMSServer()
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {}),
+	)
 	defer server.Close()
 
 	// Block the worker with a long-running callback so it can't drain the queue.
@@ -1075,8 +1080,6 @@ func TestHandleCData_QueueFull_Returns503(t *testing.T) {
 	for range cap(server.callbackCh) {
 		server.callbackCh <- func() {}
 	}
-
-	server.OnAttendance = func(record AttendanceRecord) {}
 
 	// Queue is full and worker is blocked — dispatch should fail after ~1s.
 	data := "999\t2024-01-01 08:00:00\t0\t1\t0"
@@ -1097,12 +1100,12 @@ func TestHandleCData_QueueFull_Returns503(t *testing.T) {
 }
 
 func TestHandleCData_QueueFull_DeviceRetries(t *testing.T) {
-	server := NewADMSServer()
-
 	received := make(chan AttendanceRecord, 1)
-	server.OnAttendance = func(record AttendanceRecord) {
-		received <- record
-	}
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, record AttendanceRecord) {
+			received <- record
+		}),
+	)
 
 	// Block the worker so it can't drain the queue.
 	workerBlocked := make(chan struct{})
@@ -1600,20 +1603,6 @@ func TestDrainCommands_DeletesKey(t *testing.T) {
 	}
 }
 
-func TestGetCommands_BackwardCompat(t *testing.T) {
-	// GetCommands should still work (it's deprecated but not removed).
-	server := NewADMSServer()
-	defer server.Close()
-
-	if err := server.QueueCommand("COMPAT001", "INFO"); err != nil {
-		t.Fatalf("QueueCommand failed: %v", err)
-	}
-	commands := server.GetCommands("COMPAT001")
-	if len(commands) != 1 || commands[0] != "INFO" {
-		t.Errorf("GetCommands backward compat broken: %v", commands)
-	}
-}
-
 func TestPendingCommandsCount(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
@@ -1637,41 +1626,6 @@ func TestPendingCommandsCount(t *testing.T) {
 	_ = server.DrainCommands("COUNT001")
 	if n := server.PendingCommandsCount("COUNT001"); n != 0 {
 		t.Errorf("expected 0 pending commands after drain, got %d", n)
-	}
-}
-
-func TestFunctionalOption_OverridesDeprecatedField(t *testing.T) {
-	// When both the deprecated field and functional option are set,
-	// the functional option should take precedence.
-	oldReceived := make(chan struct{}, 1)
-	newReceived := make(chan AttendanceRecord, 1)
-
-	server := NewADMSServer(
-		WithOnAttendance(func(ctx context.Context, record AttendanceRecord) {
-			newReceived <- record
-		}),
-	)
-	defer server.Close()
-
-	// Also set the deprecated field — it should NOT be called.
-	server.OnAttendance = func(record AttendanceRecord) {
-		oldReceived <- struct{}{}
-	}
-
-	data := "123\t2024-01-01 08:00:00\t0\t1\t0"
-	req := httptest.NewRequest(http.MethodPost, "/iclock/cdata?SN=TEST001&table=ATTLOG", bytes.NewBufferString(data))
-	w := httptest.NewRecorder()
-	server.HandleCData(w, req)
-
-	select {
-	case rec := <-newReceived:
-		if rec.UserID != "123" {
-			t.Errorf("expected UserID 123, got %s", rec.UserID)
-		}
-	case <-oldReceived:
-		t.Error("deprecated OnAttendance field was called instead of WithOnAttendance")
-	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for callback")
 	}
 }
 
