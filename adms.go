@@ -378,39 +378,18 @@ type DeviceSnapshot struct {
 
 // ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
 //
-// Callbacks (OnAttendance, OnDeviceInfo, OnRegistry) are dispatched asynchronously
-// via an internal worker goroutine so they never block device HTTP responses.
-// Call Close to drain the callback queue when the server is shutting down.
-//
-// Deprecated: The exported callback fields OnAttendance, OnDeviceInfo, and
-// OnRegistry are retained for backward compatibility but will be removed in a
-// future major version. Use [WithOnAttendance], [WithOnDeviceInfo], and
-// [WithOnRegistry] instead.
+// Callbacks are dispatched asynchronously via an internal worker goroutine and
+// are designed not to block device HTTP responses during normal operation.
+// Under backpressure, dispatch may wait up to dispatchTimeout when the
+// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo], and
+// [WithOnRegistry] to register callbacks. Call Close to drain the callback
+// queue when the server is shutting down.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
 	commandQueue map[string][]string // Serial number -> commands queue
 	queueMutex   sync.RWMutex
 
-	// OnAttendance is called for each attendance record received.
-	// Must be set before serving requests; concurrent mutation is not safe.
-	//
-	// Deprecated: Use [WithOnAttendance] instead.
-	OnAttendance func(record AttendanceRecord)
-
-	// OnDeviceInfo is called when a device posts its info parameters.
-	// Must be set before serving requests; concurrent mutation is not safe.
-	//
-	// Deprecated: Use [WithOnDeviceInfo] instead.
-	OnDeviceInfo func(sn string, info map[string]string)
-
-	// OnRegistry is called when a device registers or re-registers.
-	// Must be set before serving requests; concurrent mutation is not safe.
-	//
-	// Deprecated: Use [WithOnRegistry] instead.
-	OnRegistry func(sn string, info map[string]string)
-
-	// Functional-options callbacks (take context).
 	onAttendance func(ctx context.Context, record AttendanceRecord)
 	onDeviceInfo func(ctx context.Context, sn string, info map[string]string)
 	onRegistry   func(ctx context.Context, sn string, info map[string]string)
@@ -687,17 +666,15 @@ func (s *ADMSServer) dispatchCallback(fn func()) bool {
 }
 
 // dispatchAttendance dispatches attendance records to the configured callback.
-// It prefers the functional-options callback (onAttendance) over the deprecated
-// struct field (OnAttendance). Returns true if the dispatch was successful or
-// no callback is set, false if the queue is full.
+// Returns true if the dispatch was successful or no callback is set, false if
+// the queue is full.
 func (s *ADMSServer) dispatchAttendance(records []AttendanceRecord) bool {
 	if len(records) == 0 {
 		return true
 	}
 
-	cbNew := s.onAttendance
-	cbOld := s.OnAttendance
-	if cbNew == nil && cbOld == nil {
+	cb := s.onAttendance
+	if cb == nil {
 		return true
 	}
 
@@ -706,45 +683,35 @@ func (s *ADMSServer) dispatchAttendance(records []AttendanceRecord) bool {
 	return s.dispatchCallback(func() {
 		for _, record := range batch {
 			s.safeCall(func() {
-				if cbNew != nil {
-					cbNew(ctx, record)
-				} else {
-					cbOld(record)
-				}
+				cb(ctx, record)
 			})
 		}
 	})
 }
 
-// dispatchMapCallback dispatches a map-based callback (device info or registry)
-// to the appropriate new-style or deprecated callback function.
+// dispatchMapCallback dispatches a map-based callback (device info or registry).
 func (s *ADMSServer) dispatchMapCallback(
 	sn string,
 	info map[string]string,
-	cbNew func(ctx context.Context, sn string, info map[string]string),
-	cbOld func(sn string, info map[string]string),
+	cb func(ctx context.Context, sn string, info map[string]string),
 ) bool {
-	if cbNew == nil && cbOld == nil {
+	if cb == nil {
 		return true
 	}
 	ctx := s.baseCtx
 	return s.dispatchCallback(func() {
-		if cbNew != nil {
-			cbNew(ctx, sn, info)
-		} else {
-			cbOld(sn, info)
-		}
+		cb(ctx, sn, info)
 	})
 }
 
 // dispatchDeviceInfo dispatches device info to the configured callback.
 func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool {
-	return s.dispatchMapCallback(sn, info, s.onDeviceInfo, s.OnDeviceInfo)
+	return s.dispatchMapCallback(sn, info, s.onDeviceInfo)
 }
 
 // dispatchRegistry dispatches registry info to the configured callback.
 func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
-	return s.dispatchMapCallback(sn, info, s.onRegistry, s.OnRegistry)
+	return s.dispatchMapCallback(sn, info, s.onRegistry)
 }
 
 // bodyPreview returns a truncated preview of body for logging (max maxBodyPreviewLen bytes).
@@ -881,15 +848,6 @@ func (s *ADMSServer) PendingCommandsCount(serialNumber string) int {
 	s.queueMutex.RLock()
 	defer s.queueMutex.RUnlock()
 	return len(s.commandQueue[serialNumber])
-}
-
-// GetCommands retrieves and removes pending commands for a device.
-//
-// Deprecated: Use [ADMSServer.DrainCommands] instead. GetCommands is
-// misleadingly named because it mutates (deletes) the command queue as a
-// side effect.
-func (s *ADMSServer) GetCommands(serialNumber string) []string {
-	return s.DrainCommands(serialNumber)
 }
 
 // HandleCData handles the /iclock/cdata endpoint for attendance data.
@@ -1135,20 +1093,6 @@ func (s *ADMSServer) parseKVPairs(data, sep string, transformKey func(string) st
 	return info
 }
 
-// parseDeviceInfo parses device information from POST data.
-//
-// Deprecated: Kept for backward compatibility; delegates to parseKVPairs.
-func (s *ADMSServer) parseDeviceInfo(data string) map[string]string {
-	return s.parseKVPairs(data, "\n", nil)
-}
-
-// parseRegistryBody parses comma-separated key=value pairs from registry POST body.
-//
-// Deprecated: Kept for backward compatibility; delegates to parseKVPairs.
-func (s *ADMSServer) parseRegistryBody(data string) map[string]string {
-	return s.parseKVPairs(data, ",", trimTildePrefix)
-}
-
 // ServeHTTP implements http.Handler interface for convenient routing.
 func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -1170,14 +1114,6 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-// SendCommand sends a command to a device (to be retrieved on next poll).
-//
-// Deprecated: SendCommand is a trivial wrapper around [ADMSServer.QueueCommand].
-// Use QueueCommand directly to observe the returned error.
-func (s *ADMSServer) SendCommand(serialNumber, command string) {
-	_ = s.QueueCommand(serialNumber, command)
 }
 
 // SendDataCommand formats and queues a DATA QUERY command.
