@@ -924,7 +924,8 @@ func TestCallbackStableAfterEnqueue(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.HandleCData(w, req)
 
-	// The callback was captured at construction; the enqueued closure must still execute.
+	// The callback is captured when dispatchAttendance enqueues the closure; the enqueued
+	// closure must still execute even if the server's callback is later mutated.
 	select {
 	case rec := <-received:
 		if rec.UserID != "123" {
