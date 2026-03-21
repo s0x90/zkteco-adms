@@ -378,10 +378,12 @@ type DeviceSnapshot struct {
 
 // ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
 //
-// Callbacks are dispatched asynchronously via an internal worker goroutine so
-// they never block device HTTP responses. Use [WithOnAttendance],
-// [WithOnDeviceInfo], and [WithOnRegistry] to register callbacks.
-// Call Close to drain the callback queue when the server is shutting down.
+// Callbacks are dispatched asynchronously via an internal worker goroutine and
+// are designed not to block device HTTP responses during normal operation.
+// Under backpressure, dispatch may wait up to dispatchTimeout when the
+// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo], and
+// [WithOnRegistry] to register callbacks. Call Close to drain the callback
+// queue when the server is shutting down.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
