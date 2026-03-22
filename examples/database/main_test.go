@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -87,6 +88,162 @@ func TestLogMiddleware_PreservesResponse(t *testing.T) {
 	}
 	if w.Header().Get("Content-Type") != "application/json" {
 		t.Errorf("expected Content-Type application/json, got %q", w.Header().Get("Content-Type"))
+	}
+}
+
+// ---------- truncateBody tests ----------
+
+func TestTruncateBody_Short(t *testing.T) {
+	s := "short body"
+	got := truncateBody(s, len(s))
+	if got != s {
+		t.Errorf("expected %q, got %q", s, got)
+	}
+}
+
+func TestTruncateBody_ExactLimit(t *testing.T) {
+	s := strings.Repeat("x", maxLogBody)
+	got := truncateBody(s, len(s))
+	if got != s {
+		t.Errorf("expected exact body to pass through, got len %d", len(got))
+	}
+}
+
+func TestTruncateBody_Truncated(t *testing.T) {
+	s := strings.Repeat("x", maxLogBody+100)
+	got := truncateBody(s, len(s))
+	if !strings.HasPrefix(got, strings.Repeat("x", maxLogBody)) {
+		t.Error("expected truncated body to start with maxLogBody x's")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Error("expected truncation notice in output")
+	}
+	if !strings.Contains(got, fmt.Sprintf("%d bytes total", len(s))) {
+		t.Errorf("expected total byte count in truncation notice")
+	}
+}
+
+// ---------- statusRecorder body capture tests ----------
+
+func TestStatusRecorder_CapturesBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+	rec.Write([]byte("hello"))
+	rec.Write([]byte(" world"))
+
+	if rec.body.String() != "hello world" {
+		t.Errorf("expected captured body %q, got %q", "hello world", rec.body.String())
+	}
+}
+
+// ---------- logMiddleware panic recovery test ----------
+
+func TestLogMiddleware_PanicRecovery(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		panic("test panic")
+	})
+
+	handler := logMiddleware(inner)
+	req := httptest.NewRequest(http.MethodGet, "/panic-path", nil)
+	w := httptest.NewRecorder()
+
+	defer func() {
+		v := recover()
+		if v == nil {
+			t.Fatal("expected panic to be re-raised")
+		}
+		if v != "test panic" {
+			t.Errorf("expected panic value %q, got %v", "test panic", v)
+		}
+		logOutput := buf.String()
+		if !strings.Contains(logOutput, "http exchange (panic)") {
+			t.Errorf("expected panic log entry; got: %s", logOutput)
+		}
+	}()
+
+	handler.ServeHTTP(w, req)
+}
+
+// ---------- logMiddleware with request body and query params ----------
+
+func TestLogMiddleware_WithRequestBody(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Write(body)
+	})
+
+	handler := logMiddleware(inner)
+	reqBody := "test request body content"
+	req := httptest.NewRequest(http.MethodPost, "/test?foo=bar", strings.NewReader(reqBody))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Body.String() != reqBody {
+		t.Errorf("expected echoed body %q, got %q", reqBody, w.Body.String())
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "foo=bar") {
+		t.Errorf("expected query params in log; got: %s", logOutput)
+	}
+}
+
+func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := logMiddleware(inner)
+	largeBody := strings.Repeat("A", maxLogBody+500)
+	req := httptest.NewRequest(http.MethodPost, "/large-body", strings.NewReader(largeBody))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "truncated") {
+		t.Errorf("expected truncation in log for large body; got: %s", logOutput)
+	}
+}
+
+func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	largeResp := strings.Repeat("B", maxLogBody+500)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(largeResp))
+	})
+
+	handler := logMiddleware(inner)
+	req := httptest.NewRequest(http.MethodGet, "/large-response", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "truncated") {
+		t.Errorf("expected truncation in log for large response body; got: %s", logOutput)
 	}
 }
 
