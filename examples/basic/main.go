@@ -12,22 +12,30 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
 )
 
-// statusRecorder wraps http.ResponseWriter to capture the status code.
+// maxLogBody is the maximum number of bytes logged for request/response bodies.
+const maxLogBody = 1024
+
+// statusRecorder wraps http.ResponseWriter to capture the status code and
+// response body for debug logging.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	body   bytes.Buffer
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -35,24 +43,77 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// logMiddleware logs each HTTP request with method, path, query parameters,
-// remote address, headers, response status code, and duration.
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.body.Write(b)
+	return r.ResponseWriter.Write(b)
+}
+
+// truncateBody returns s as-is when it fits within maxLogBody, otherwise
+// returns the first maxLogBody bytes with a truncation notice.
+func truncateBody(s string, total int) string {
+	if len(s) <= maxLogBody {
+		return s
+	}
+	return s[:maxLogBody] + fmt.Sprintf("... (truncated, %d bytes total)", total)
+}
+
+// logMiddleware logs each HTTP request and response in a human-readable
+// HTTP-style dump format that shows the full request line, headers,
+// request body, response status, response headers, and response body.
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
-		defer func() {
-			slog.Info("http request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"query", r.URL.RawQuery,
-				"remote", r.RemoteAddr,
-				"headers", r.Header,
-				"status", rec.status,
-				"duration", time.Since(start),
-			)
-		}()
+
+		// Buffer request body so downstream handlers can still read it.
+		var reqBody []byte
+		if r.Body != nil {
+			reqBody, _ = io.ReadAll(r.Body)
+			r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(reqBody))
+		}
+
 		next.ServeHTTP(rec, r)
+
+		elapsed := time.Since(start)
+
+		// --- Build request section ---
+		var buf strings.Builder
+		buf.WriteString("\n--- HTTP Request ---\n")
+		fullPath := r.URL.Path
+		if r.URL.RawQuery != "" {
+			fullPath += "?" + r.URL.RawQuery
+		}
+		fmt.Fprintf(&buf, "%s %s %s\n", r.Method, fullPath, r.Proto)
+		fmt.Fprintf(&buf, "Host: %s\n", r.Host)
+		for name, vals := range r.Header {
+			fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
+		}
+		if len(reqBody) > 0 {
+			buf.WriteString("\n")
+			buf.WriteString(truncateBody(string(reqBody), len(reqBody)))
+			buf.WriteString("\n")
+		}
+
+		// --- Build response section ---
+		fmt.Fprintf(&buf, "\n--- HTTP Response (%d %s, %s) ---\n",
+			rec.status, http.StatusText(rec.status), elapsed)
+		for name, vals := range rec.Header() {
+			fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
+		}
+		if rec.body.Len() > 0 {
+			buf.WriteString("\n")
+			buf.WriteString(truncateBody(rec.body.String(), rec.body.Len()))
+			buf.WriteString("\n")
+		}
+
+		slog.Info("http exchange",
+			"method", r.Method,
+			"path", fullPath,
+			"status", rec.status,
+			"duration", elapsed,
+			"dump", buf.String(),
+		)
 	})
 }
 

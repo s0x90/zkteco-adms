@@ -63,7 +63,7 @@ func TestLogMiddleware_LogsRequest(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	logOutput := buf.String()
-	for _, want := range []string{"http request", "method=GET", "path=/test", "status=201", "duration="} {
+	for _, want := range []string{"http exchange", "method=GET", "path=/test", "status=201", "duration="} {
 		if !strings.Contains(logOutput, want) {
 			t.Errorf("log output missing %q; got: %s", want, logOutput)
 		}
@@ -618,7 +618,7 @@ func TestNewMux_LogsRequests(t *testing.T) {
 	mux.ServeHTTP(w, req)
 
 	logOutput := buf.String()
-	if !strings.Contains(logOutput, "http request") {
+	if !strings.Contains(logOutput, "http exchange") {
 		t.Errorf("expected log output from logMiddleware; got: %s", logOutput)
 	}
 	if !strings.Contains(logOutput, "path=/api/attendance") {
