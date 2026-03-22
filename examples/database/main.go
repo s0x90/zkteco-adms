@@ -38,6 +38,12 @@ const maxLogBody = 1024
 
 // statusRecorder wraps http.ResponseWriter to capture the status code and
 // response body for debug logging.
+//
+// PRODUCTION NOTE: This wrapper only forwards WriteHeader and Write. In
+// production you should also implement Unwrap(), Flush() (http.Flusher),
+// and Hijack() (http.Hijacker) so that wrapped handlers retain access to
+// optional http.ResponseWriter capabilities (e.g. streaming, WebSocket
+// upgrades, http.ResponseController).
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -59,6 +65,12 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 
 // truncateBody returns s as-is when it fits within maxLogBody, otherwise
 // returns the first maxLogBody bytes with a truncation notice.
+//
+// PRODUCTION NOTE: The reported "total" is only the number of captured
+// bytes, not the true payload size (the body is read through a
+// LimitReader). Production code should track actual bytes written/read
+// separately and report the real total so operators are not misled during
+// incident debugging.
 func truncateBody(s string, total int) string {
 	if len(s) <= maxLogBody {
 		return s
@@ -86,6 +98,11 @@ func logMiddleware(next http.Handler) http.Handler {
 			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, maxLogBody+1))
 			// Reconstruct the body so downstream sees the complete payload:
 			// the bytes we already consumed followed by whatever remains.
+			//
+			// PRODUCTION NOTE: io.NopCloser discards the original body's
+			// Close method, which can degrade connection reuse under load.
+			// Production code should wrap the MultiReader with a custom
+			// ReadCloser that forwards Close() to the original r.Body.
 			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(reqBody), r.Body))
 		}
 
@@ -100,6 +117,12 @@ func logMiddleware(next http.Handler) http.Handler {
 				panicVal = v
 			}
 
+			// PRODUCTION NOTE: This builds the full dump string on every
+			// request even when the log level is above Info. Production
+			// code should check slog.Default().Enabled(ctx, slog.LevelInfo)
+			// before buffering bodies and building the dump to avoid
+			// unnecessary CPU and allocation overhead under load.
+
 			elapsed := time.Since(start)
 
 			// --- Build request section ---
@@ -111,6 +134,10 @@ func logMiddleware(next http.Handler) http.Handler {
 			}
 			fmt.Fprintf(&buf, "%s %s %s\n", r.Method, fullPath, r.Proto)
 			fmt.Fprintf(&buf, "Host: %s\n", r.Host)
+			// PRODUCTION NOTE: Headers are dumped verbatim here. Production
+			// code must redact sensitive headers (Authorization, Cookie,
+			// Set-Cookie) and should gate body logging behind an explicit
+			// debug flag to avoid leaking credentials or PII into logs.
 			for name, vals := range r.Header {
 				fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
 			}
