@@ -85,7 +85,7 @@ func logMiddleware(next http.Handler) http.Handler {
 
 		// Deferred logging ensures the exchange is recorded even when a
 		// downstream handler panics.  After logging we re-panic so the
-		// standard recovery behaviour is preserved.
+		// standard recovery behavior is preserved.
 		var panicked bool
 		var panicVal any
 		defer func() {
