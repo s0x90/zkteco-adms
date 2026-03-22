@@ -50,8 +50,11 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
-	r.body.Write(b)
-	return r.ResponseWriter.Write(b)
+	n, err := r.ResponseWriter.Write(b)
+	if n > 0 && r.body.Len() < maxLogBody+1 {
+		r.body.Write(b[:n])
+	}
+	return n, err
 }
 
 // truncateBody returns s as-is when it fits within maxLogBody, otherwise
@@ -66,60 +69,91 @@ func truncateBody(s string, total int) string {
 // logMiddleware logs each HTTP request and response in a human-readable
 // HTTP-style dump format that shows the full request line, headers,
 // request body, response status, response headers, and response body.
+//
+// NOTE: This middleware logs all headers and bodies verbatim. In a
+// production deployment you should redact sensitive headers (e.g.
+// Authorization, Cookie) and consider gating body logging behind a
+// debug flag.
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 
-		// Buffer request body so downstream handlers can still read it.
+		// Buffer request body (up to maxLogBody bytes) for logging while
+		// preserving the full stream for downstream handlers.
 		var reqBody []byte
 		if r.Body != nil {
-			reqBody, _ = io.ReadAll(r.Body)
-			r.Body.Close()
-			r.Body = io.NopCloser(bytes.NewReader(reqBody))
+			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, maxLogBody+1))
+			// Reconstruct the body so downstream sees the complete payload:
+			// the bytes we already consumed followed by whatever remains.
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(reqBody), r.Body))
 		}
+
+		// Deferred logging ensures the exchange is recorded even when a
+		// downstream handler panics.  After logging we re-panic so the
+		// standard recovery behaviour is preserved.
+		var panicked bool
+		var panicVal any
+		defer func() {
+			if v := recover(); v != nil {
+				panicked = true
+				panicVal = v
+			}
+
+			elapsed := time.Since(start)
+
+			// --- Build request section ---
+			var buf strings.Builder
+			buf.WriteString("\n--- HTTP Request ---\n")
+			fullPath := r.URL.Path
+			if r.URL.RawQuery != "" {
+				fullPath += "?" + r.URL.RawQuery
+			}
+			fmt.Fprintf(&buf, "%s %s %s\n", r.Method, fullPath, r.Proto)
+			fmt.Fprintf(&buf, "Host: %s\n", r.Host)
+			for name, vals := range r.Header {
+				fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
+			}
+			if len(reqBody) > 0 {
+				buf.WriteString("\n")
+				buf.WriteString(truncateBody(string(reqBody), len(reqBody)))
+				buf.WriteString("\n")
+			}
+
+			// --- Build response section ---
+			fmt.Fprintf(&buf, "\n--- HTTP Response (%d %s, %s) ---\n",
+				rec.status, http.StatusText(rec.status), elapsed)
+			for name, vals := range rec.Header() {
+				fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
+			}
+			if rec.body.Len() > 0 {
+				buf.WriteString("\n")
+				buf.WriteString(truncateBody(rec.body.String(), rec.body.Len()))
+				buf.WriteString("\n")
+			}
+
+			if panicked {
+				slog.Error("http exchange (panic)",
+					"method", r.Method,
+					"path", fullPath,
+					"status", rec.status,
+					"duration", elapsed,
+					"panic", panicVal,
+					"dump", buf.String(),
+				)
+				panic(panicVal) // re-panic for upstream recovery
+			}
+
+			slog.Info("http exchange",
+				"method", r.Method,
+				"path", fullPath,
+				"status", rec.status,
+				"duration", elapsed,
+				"dump", buf.String(),
+			)
+		}()
 
 		next.ServeHTTP(rec, r)
-
-		elapsed := time.Since(start)
-
-		// --- Build request section ---
-		var buf strings.Builder
-		buf.WriteString("\n--- HTTP Request ---\n")
-		fullPath := r.URL.Path
-		if r.URL.RawQuery != "" {
-			fullPath += "?" + r.URL.RawQuery
-		}
-		fmt.Fprintf(&buf, "%s %s %s\n", r.Method, fullPath, r.Proto)
-		fmt.Fprintf(&buf, "Host: %s\n", r.Host)
-		for name, vals := range r.Header {
-			fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
-		}
-		if len(reqBody) > 0 {
-			buf.WriteString("\n")
-			buf.WriteString(truncateBody(string(reqBody), len(reqBody)))
-			buf.WriteString("\n")
-		}
-
-		// --- Build response section ---
-		fmt.Fprintf(&buf, "\n--- HTTP Response (%d %s, %s) ---\n",
-			rec.status, http.StatusText(rec.status), elapsed)
-		for name, vals := range rec.Header() {
-			fmt.Fprintf(&buf, "%s: %s\n", name, strings.Join(vals, ", "))
-		}
-		if rec.body.Len() > 0 {
-			buf.WriteString("\n")
-			buf.WriteString(truncateBody(rec.body.String(), rec.body.Len()))
-			buf.WriteString("\n")
-		}
-
-		slog.Info("http exchange",
-			"method", r.Method,
-			"path", fullPath,
-			"status", rec.status,
-			"duration", elapsed,
-			"dump", buf.String(),
-		)
 	})
 }
 
