@@ -303,7 +303,14 @@ func requireDevice(w http.ResponseWriter, r *http.Request, server *zkadms.ADMSSe
 
 // queueOrFail queues a command and writes a JSON error on failure.
 func queueOrFail(w http.ResponseWriter, server *zkadms.ADMSServer, sn, cmd string) bool {
-	if err := server.QueueCommand(sn, cmd); err != nil {
+	return sendOrFail(w, sn, server.QueueCommand(sn, cmd))
+}
+
+// sendOrFail checks err from a Send*/QueueCommand call and writes a JSON
+// error response when non-nil.  Returns true when the command was queued
+// successfully.
+func sendOrFail(w http.ResponseWriter, sn string, err error) bool {
+	if err != nil {
 		if errors.Is(err, zkadms.ErrCommandQueueFull) {
 			writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
 		} else {
@@ -337,12 +344,7 @@ func handleInfo(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if err := server.SendInfoCommand(sn); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendInfoCommand(sn)) {
 			return
 		}
 		writeCommandOK(w, sn, "INFO")
@@ -410,12 +412,7 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		if err := server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card)) {
 			return
 		}
 		writeCommandOK(w, sn, "USER ADD")
@@ -438,12 +435,7 @@ func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		if err := server.SendUserDeleteCommand(sn, req.PIN); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendUserDeleteCommand(sn, req.PIN)) {
 			return
 		}
 		writeCommandOK(w, sn, "USER DEL")
@@ -471,12 +463,7 @@ func handleCheck(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if err := server.SendCheckCommand(sn); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendCheckCommand(sn)) {
 			return
 		}
 		writeCommandOK(w, sn, "CHECK")
@@ -500,12 +487,7 @@ func handleGetOption(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		if err := server.SendGetOptionCommand(sn, req.Key); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendGetOptionCommand(sn, req.Key)) {
 			return
 		}
 		writeCommandOK(w, sn, "GET OPTION FROM "+req.Key)
@@ -531,12 +513,7 @@ func handleShell(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "command is required")
 			return
 		}
-		if err := server.SendShellCommand(sn, req.Command); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendShellCommand(sn, req.Command)) {
 			return
 		}
 		writeCommandOK(w, sn, "Shell "+req.Command)
@@ -551,12 +528,7 @@ func handleQueryUsers(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if err := server.SendQueryUsersCommand(sn); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendQueryUsersCommand(sn)) {
 			return
 		}
 		writeCommandOK(w, sn, "DATA QUERY USERINFO")
@@ -570,12 +542,7 @@ func handleLog(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if err := server.SendLogCommand(sn); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendLogCommand(sn)) {
 			return
 		}
 		writeCommandOK(w, sn, "LOG")

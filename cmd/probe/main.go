@@ -142,15 +142,34 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	if err := run(ctx, *addr, *sn, *destructive, *delayMs, 120*time.Second); err != nil {
+	if err := run(ctx, probeConfig{
+		addr:            *addr,
+		sn:              *sn,
+		destructive:     *destructive,
+		delayMs:         *delayMs,
+		commandTimeout:  120 * time.Second,
+		maxCommands:     200,
+		onlineThreshold: 2 * time.Minute,
+	}); err != nil {
 		stop()
 		log.Fatal(err)
 	}
 	stop()
 }
 
+// probeConfig holds the configuration for a single probe run.
+type probeConfig struct {
+	addr            string
+	sn              string
+	destructive     bool
+	delayMs         int
+	commandTimeout  time.Duration
+	maxCommands     int
+	onlineThreshold time.Duration // 0 uses the zkadms default (2 min)
+}
+
 // run is the core probe logic, extracted from main for testability.
-func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, commandTimeout time.Duration) error {
+func run(ctx context.Context, cfg probeConfig) error {
 	// Track results.
 	// Commands are queued FIFO and assigned IDs at write-time, so we
 	// correlate results by maintaining a queue of queued candidates in
@@ -163,9 +182,9 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 		replied int         // how many confirmations received
 	)
 
-	server := zkadms.NewADMSServer(
+	opts := []zkadms.Option{
 		zkadms.WithEnableInspect(),
-		zkadms.WithMaxCommandsPerDevice(200),
+		zkadms.WithMaxCommandsPerDevice(cfg.maxCommands),
 		zkadms.WithOnCommandResult(func(_ context.Context, cr zkadms.CommandResult) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -203,10 +222,14 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 			}
 			fmt.Println("---")
 		}),
-	)
+	}
+	if cfg.onlineThreshold > 0 {
+		opts = append(opts, zkadms.WithOnlineThreshold(cfg.onlineThreshold))
+	}
+	server := zkadms.NewADMSServer(opts...)
 	defer server.Close()
 
-	if err := server.RegisterDevice(sn); err != nil {
+	if err := server.RegisterDevice(cfg.sn); err != nil {
 		return fmt.Errorf("RegisterDevice: %w", err)
 	}
 
@@ -215,7 +238,7 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 
 	handler := logHandler(mux)
 
-	srv := &http.Server{Addr: addr, Handler: handler}
+	srv := &http.Server{Addr: cfg.addr, Handler: handler}
 
 	// cancelFn is used by the probe goroutine to trigger shutdown when done.
 	ctx, cancelFn := context.WithCancel(ctx)
@@ -235,8 +258,8 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 		// Wait for device to connect first.
 		fmt.Println("Waiting for device to connect...")
 		for {
-			if server.IsDeviceOnline(sn) {
-				fmt.Printf("Device %s is online!\n\n", sn)
+			if server.IsDeviceOnline(cfg.sn) {
+				fmt.Printf("Device %s is online!\n\n", cfg.sn)
 				break
 			}
 			select {
@@ -246,11 +269,11 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 			}
 		}
 
-		delay := time.Duration(delayMs) * time.Millisecond
+		delay := time.Duration(cfg.delayMs) * time.Millisecond
 
 		fmt.Println("=== PROBING COMMANDS ===")
 		fmt.Printf("Delay between commands: %v\n", delay)
-		fmt.Printf("Destructive mode: %v\n\n", destructive)
+		fmt.Printf("Destructive mode: %v\n\n", cfg.destructive)
 
 		for _, c := range candidates {
 			select {
@@ -259,7 +282,7 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 			default:
 			}
 
-			if !c.safe && !destructive {
+			if !c.safe && !cfg.destructive {
 				fmt.Printf("  SKIP (destructive): %s  | %s\n", c.cmd, c.desc)
 				continue
 			}
@@ -269,7 +292,7 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 			queuedCount := len(queued)
 			mu.Unlock()
 
-			if err := server.QueueCommand(sn, c.cmd); err != nil {
+			if err := server.QueueCommand(cfg.sn, c.cmd); err != nil {
 				fmt.Printf("  QUEUE ERROR: %s: %v\n", c.cmd, err)
 				continue
 			}
@@ -288,7 +311,7 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 		fmt.Println()
 
 		// Wait for all queued commands to be confirmed or timeout.
-		timeout := time.After(commandTimeout)
+		timeout := time.After(cfg.commandTimeout)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -329,8 +352,8 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, co
 		}
 	}()
 
-	fmt.Printf("ADMS Probe Server listening on %s\n", addr)
-	fmt.Printf("Device: %s\n", sn)
+	fmt.Printf("ADMS Probe Server listening on %s\n", cfg.addr)
+	fmt.Printf("Device: %s\n", cfg.sn)
 	fmt.Println("Endpoints: /iclock/* (ADMS protocol)")
 	fmt.Println()
 
