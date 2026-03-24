@@ -1685,3 +1685,55 @@ func TestRun_InvalidDevice(t *testing.T) {
 		t.Errorf("expected 'register device' in error, got: %v", err)
 	}
 }
+
+// ---------- writeJSON encode error ----------
+
+// errWriter is an http.ResponseWriter whose Write always returns an error,
+// exercising the json.Encode error path in writeJSON.
+type errWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *errWriter) Header() http.Header  { return w.header }
+func (w *errWriter) WriteHeader(code int) { w.status = code }
+func (w *errWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write error")
+}
+
+func TestWriteJSON_EncodeError(t *testing.T) {
+	// Suppress the slog.Warn that writeJSON emits on encode failure.
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := &errWriter{header: make(http.Header)}
+	writeJSON(w, http.StatusOK, map[string]string{"hello": "world"})
+
+	// writeJSON should not panic; it logs the error and returns silently.
+	if w.status != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.status)
+	}
+}
+
+// ---------- requireDevice empty serial number ----------
+
+func TestRequireDevice_EmptySN(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+
+	// Build a request without routing through the mux so that
+	// r.PathValue("sn") returns "".
+	req := httptest.NewRequest(http.MethodPost, "/api/devices//reboot", nil)
+	w := httptest.NewRecorder()
+
+	sn, ok := requireDevice(w, req, server)
+	if ok {
+		t.Fatal("expected requireDevice to return false for empty SN")
+	}
+	if sn != "" {
+		t.Errorf("expected empty SN, got %q", sn)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}

@@ -998,3 +998,40 @@ func TestAttendanceHandler_MultipleUsers(t *testing.T) {
 		t.Errorf("expected 4 total records, got %d", resp.Total)
 	}
 }
+
+// ---------- JSON encode error paths ----------
+
+// errWriter is an http.ResponseWriter whose Write always returns an error,
+// exercising the json.Encode error path in handler functions.
+type errWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *errWriter) Header() http.Header  { return w.header }
+func (w *errWriter) WriteHeader(code int) { w.status = code }
+func (w *errWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write error")
+}
+
+func TestAttendanceHandler_EncodeError(t *testing.T) {
+	store := NewAttendanceStore()
+	handler := attendanceHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w := &errWriter{header: make(http.Header)}
+	handler.ServeHTTP(w, req)
+
+	// The handler should not panic; the encode error is logged.
+}
+
+func TestSummaryHandler_EncodeError(t *testing.T) {
+	store := NewAttendanceStore()
+	handler := summaryHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
+	w := &errWriter{header: make(http.Header)}
+	handler.ServeHTTP(w, req)
+
+	// The handler should not panic; the encode error is logged.
+}

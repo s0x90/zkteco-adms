@@ -3502,6 +3502,81 @@ func TestHandleInspect_EmptyDeviceList(t *testing.T) {
 	}
 }
 
+// errResponseWriter is an http.ResponseWriter whose Write always returns an error.
+// It records the status code passed to WriteHeader for assertions.
+type errResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func newErrResponseWriter() *errResponseWriter {
+	return &errResponseWriter{header: make(http.Header)}
+}
+
+func (w *errResponseWriter) Header() http.Header       { return w.header }
+func (w *errResponseWriter) WriteHeader(code int)      { w.status = code }
+func (w *errResponseWriter) Write([]byte) (int, error) { return 0, errors.New("simulated write error") }
+
+func TestHandleInspect_WriteError(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := newErrResponseWriter()
+	server.HandleInspect(w, req)
+
+	// The handler should not panic; the write error is logged and silently
+	// absorbed. We just verify it didn't crash.
+}
+
+func TestHandleInspect_WriteError_WithDevices(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	server.updateDeviceActivity("DEV001")
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := newErrResponseWriter()
+	server.HandleInspect(w, req)
+}
+
+// errOnNthWriteResponseWriter succeeds for the first (n-1) Write calls and
+// returns an error on the nth call. This lets tests exercise the trailing-
+// newline write-error path in HandleInspect.
+type errOnNthWriteResponseWriter struct {
+	header http.Header
+	status int
+	calls  int
+	failOn int // 1-based: fail on the Nth Write call
+}
+
+func newErrOnNthWriteResponseWriter(n int) *errOnNthWriteResponseWriter {
+	return &errOnNthWriteResponseWriter{header: make(http.Header), failOn: n}
+}
+
+func (w *errOnNthWriteResponseWriter) Header() http.Header  { return w.header }
+func (w *errOnNthWriteResponseWriter) WriteHeader(code int) { w.status = code }
+func (w *errOnNthWriteResponseWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls >= w.failOn {
+		return 0, errors.New("simulated write error on call " + fmt.Sprintf("%d", w.calls))
+	}
+	return len(p), nil
+}
+
+func TestHandleInspect_TrailingNewlineWriteError(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	// First Write (JSON body) succeeds; second Write (trailing newline) fails.
+	w := newErrOnNthWriteResponseWriter(2)
+	server.HandleInspect(w, req)
+}
+
 // ---------------------------------------------------------------------------
 // HandleCData coverage — method not allowed, missing SN, GET with commands
 // ---------------------------------------------------------------------------
