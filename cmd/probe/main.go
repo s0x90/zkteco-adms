@@ -142,7 +142,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
-	if err := run(ctx, *addr, *sn, *destructive, *delayMs); err != nil {
+	if err := run(ctx, *addr, *sn, *destructive, *delayMs, 120*time.Second); err != nil {
 		stop()
 		log.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func main() {
 }
 
 // run is the core probe logic, extracted from main for testability.
-func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) error {
+func run(ctx context.Context, addr, sn string, destructive bool, delayMs int, commandTimeout time.Duration) error {
 	// Track results.
 	// Commands are queued FIFO and assigned IDs at write-time, so we
 	// correlate results by maintaining a queue of queued candidates in
@@ -288,7 +288,7 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) er
 		fmt.Println()
 
 		// Wait for all queued commands to be confirmed or timeout.
-		timeout := time.After(120 * time.Second)
+		timeout := time.After(commandTimeout)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {

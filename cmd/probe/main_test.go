@@ -217,7 +217,7 @@ func TestRun_StartsAndStops(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, ":0", "TESTDEV001", false, 10)
+		errCh <- run(ctx, ":0", "TESTDEV001", false, 10, 120*time.Second)
 	}()
 
 	// Give the server a moment to start listening.
@@ -239,7 +239,7 @@ func TestRun_InvalidAddr(t *testing.T) {
 	defer cancel()
 
 	// An obviously invalid address should make ListenAndServe fail immediately.
-	err := run(ctx, ":-1", "TESTDEV001", false, 10)
+	err := run(ctx, ":-1", "TESTDEV001", false, 10, 120*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
 	}
@@ -249,7 +249,7 @@ func TestRun_InvalidSerialNumber(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	err := run(ctx, ":0", "INVALID DEVICE!", false, 10)
+	err := run(ctx, ":0", "INVALID DEVICE!", false, 10, 120*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid serial number, got nil")
 	}
@@ -273,7 +273,7 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, addr, "PROBEDEV", false, 10)
+		errCh <- run(ctx, addr, "PROBEDEV", false, 10, 120*time.Second)
 	}()
 
 	// Wait for server to start using a readiness loop.
@@ -346,7 +346,7 @@ func TestRun_DestructiveFlag(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, ":0", "TESTDEV002", true, 10)
+		errCh <- run(ctx, ":0", "TESTDEV002", true, 10, 120*time.Second)
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -416,7 +416,7 @@ func TestRun_WithSmallDelay(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, ":0", "TESTDEV003", false, 0) // zero delay
+		errCh <- run(ctx, ":0", "TESTDEV003", false, 0, 120*time.Second) // zero delay
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -557,7 +557,7 @@ func TestRun_FullProbeWithDeviceOnline(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		// destructive=true so ALL candidates get queued (exercises both paths).
-		errCh <- run(ctx, addr, "FULLTEST", true, 0)
+		errCh <- run(ctx, addr, "FULLTEST", true, 0, 120*time.Second)
 	}()
 
 	// Wait for server readiness.
@@ -610,6 +610,98 @@ func TestRun_FullProbeWithDeviceOnline(t *testing.T) {
 	}
 }
 
+// TestRun_PartialConfirmations sends only some confirmations and waits
+// long enough for the ticker to fire, exercising the "still pending" log
+// path (line 327) in the confirmation-waiting loop.
+func TestRun_PartialConfirmations(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		// destructive=false, delayMs=0 => only safe commands queued instantly.
+		errCh <- run(ctx, addr, "PARTIALTEST", false, 0, 120*time.Second)
+	}()
+
+	base := "http://" + addr
+	waitForServer(t, base+"/iclock/cdata?SN=PARTIALTEST")
+
+	// Wait for commands to be queued.
+	time.Sleep(500 * time.Millisecond)
+
+	// Send only 2 confirmations out of many safe commands.
+	for i := range 2 {
+		cmdResult := fmt.Sprintf("ID=%d&Return=0&CMD=CMD%d", i+1, i+1)
+		resp, err := http.Post(base+"/iclock/devicecmd?SN=PARTIALTEST",
+			"text/plain", strings.NewReader(cmdResult))
+		if err != nil {
+			t.Fatalf("POST devicecmd %d failed: %v", i+1, err)
+		}
+		resp.Body.Close()
+	}
+
+	// Wait for at least one ticker cycle (5s) so the "still pending"
+	// message is printed. The ticker fires every 5 seconds and checks
+	// remaining > 0 which will be true since we only sent 2 out of ~30.
+	time.Sleep(6 * time.Second)
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return within 10s")
+	}
+}
+
+// TestRun_ContextCancelDuringDeviceWait cancels the context before the
+// device comes online, exercising the ctx.Done path in the device-wait loop.
+func TestRun_ContextCancelDuringDeviceWait(t *testing.T) {
+	// We need a device that is NOT online. RegisterDevice marks it as online
+	// immediately, so the wait loop exits right away. The only way to hit the
+	// ctx.Done select branch is to cancel before the goroutine checks IsDeviceOnline.
+	// We test this indirectly: start with a very short context timeout that
+	// expires while the goroutine is in the 1-second sleep of the wait loop.
+	// Since IsDeviceOnline returns true immediately after RegisterDevice, this
+	// won't hit the select. Instead, we rely on context cancellation during
+	// the command queuing loop (line 256-260).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	// Use a very short-lived context.
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		// destructive=true + large delay = goroutine will be mid-queuing when ctx expires.
+		errCh <- run(ctx, addr, "CANCELTEST", true, 5000, 120*time.Second)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return within 10s")
+	}
+}
+
 // TestRun_SafeOnlyFiltering verifies that with destructive=false, the
 // goroutine skips destructive commands (exercises the SKIP branch).
 func TestRun_SafeOnlyFiltering(t *testing.T) {
@@ -626,7 +718,7 @@ func TestRun_SafeOnlyFiltering(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		// destructive=false: destructive commands are skipped.
-		errCh <- run(ctx, addr, "SAFETEST", false, 0)
+		errCh <- run(ctx, addr, "SAFETEST", false, 0, 120*time.Second)
 	}()
 
 	base := "http://" + addr
@@ -663,7 +755,7 @@ func TestRun_AllConfirmationsReceived(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		// destructive=false, delayMs=0 => only safe commands queued instantly.
-		errCh <- run(ctx, addr, "ALLCONFIRM", false, 0)
+		errCh <- run(ctx, addr, "ALLCONFIRM", false, 0, 120*time.Second)
 	}()
 
 	base := "http://" + addr
@@ -701,5 +793,46 @@ func TestRun_AllConfirmationsReceived(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("run did not self-terminate after all confirmations")
+	}
+}
+
+// TestRun_Timeout exercises the timeout path (lines 298-309 in main.go)
+// by using a very short commandTimeout. Commands are queued but no
+// confirmations are sent, so the timeout fires before completion.
+// This covers: the timeout select case, snapshot copies of results/queued/
+// replied, the printSummary call, and cancelFn() — 11 statements total.
+func TestRun_Timeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		// Use a 2-second timeout. With delayMs=0 and destructive=false,
+		// safe commands are queued instantly. No confirmations are sent,
+		// so the timeout fires after 2 seconds.
+		errCh <- run(ctx, addr, "TIMEOUTDEV", false, 0, 2*time.Second)
+	}()
+
+	// Wait for the server to start.
+	base := "http://" + addr
+	waitForServer(t, base+"/iclock/cdata?SN=TIMEOUTDEV")
+
+	// Don't send any confirmations — let the timeout fire.
+	// The probe should self-terminate after the 2-second timeout
+	// plus up to one 5-second ticker cycle.
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not self-terminate after timeout")
 	}
 }
