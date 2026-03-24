@@ -141,8 +141,16 @@ func main() {
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
+	if err := run(ctx, *addr, *sn, *destructive, *delayMs); err != nil {
+		stop()
+		log.Fatal(err)
+	}
+	stop()
+}
+
+// run is the core probe logic, extracted from main for testability.
+func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) error {
 	// Track results.
 	// Commands are queued FIFO and assigned IDs at write-time, so we
 	// correlate results by maintaining a queue of queued candidates in
@@ -198,35 +206,21 @@ func main() {
 	)
 	defer server.Close()
 
-	if err := server.RegisterDevice(*sn); err != nil {
-		log.Printf("RegisterDevice: %v", err)
-		return
+	if err := server.RegisterDevice(sn); err != nil {
+		return fmt.Errorf("RegisterDevice: %w", err)
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/iclock/", server)
 
-	// Wrap mux with a logging middleware to see all device requests.
-	logHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Capture the body for POST requests.
-		var bodyStr string
-		if r.Method == http.MethodPost && r.Body != nil {
-			bodyBytes, err := io.ReadAll(r.Body)
-			if err == nil {
-				bodyStr = string(bodyBytes)
-				// Put the body back for the actual handler.
-				r.Body = io.NopCloser(strings.NewReader(bodyStr))
-			}
-		}
-		query := r.URL.RawQuery
-		if len(bodyStr) > 200 {
-			bodyStr = bodyStr[:200] + "...(truncated)"
-		}
-		fmt.Printf("  >>> %s %s?%s  body=%q\n", r.Method, r.URL.Path, query, bodyStr)
-		mux.ServeHTTP(w, r)
-	})
+	handler := logHandler(mux)
 
-	srv := &http.Server{Addr: *addr, Handler: logHandler}
+	srv := &http.Server{Addr: addr, Handler: handler}
+
+	// cancelFn is used by the probe goroutine to trigger shutdown when done.
+	ctx, cancelFn := context.WithCancel(ctx)
+	defer cancelFn()
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -241,22 +235,22 @@ func main() {
 		// Wait for device to connect first.
 		fmt.Println("Waiting for device to connect...")
 		for {
+			if server.IsDeviceOnline(sn) {
+				fmt.Printf("Device %s is online!\n\n", sn)
+				break
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(1 * time.Second):
 			}
-			if server.IsDeviceOnline(*sn) {
-				fmt.Printf("Device %s is online!\n\n", *sn)
-				break
-			}
 		}
 
-		delay := time.Duration(*delayMs) * time.Millisecond
+		delay := time.Duration(delayMs) * time.Millisecond
 
 		fmt.Println("=== PROBING COMMANDS ===")
 		fmt.Printf("Delay between commands: %v\n", delay)
-		fmt.Printf("Destructive mode: %v\n\n", *destructive)
+		fmt.Printf("Destructive mode: %v\n\n", destructive)
 
 		for _, c := range candidates {
 			select {
@@ -265,7 +259,7 @@ func main() {
 			default:
 			}
 
-			if !c.safe && !*destructive {
+			if !c.safe && !destructive {
 				fmt.Printf("  SKIP (destructive): %s  | %s\n", c.cmd, c.desc)
 				continue
 			}
@@ -275,7 +269,7 @@ func main() {
 			queuedCount := len(queued)
 			mu.Unlock()
 
-			if err := server.QueueCommand(*sn, c.cmd); err != nil {
+			if err := server.QueueCommand(sn, c.cmd); err != nil {
 				fmt.Printf("  QUEUE ERROR: %s: %v\n", c.cmd, err)
 				continue
 			}
@@ -304,7 +298,7 @@ func main() {
 			case <-timeout:
 				fmt.Println("\n=== TIMEOUT — printing summary ===")
 				printSummary(&mu, results, queued, replied)
-				stop()
+				cancelFn()
 				return
 			case <-ticker.C:
 				mu.Lock()
@@ -313,7 +307,7 @@ func main() {
 				if remaining <= 0 {
 					fmt.Println("\n=== ALL CONFIRMATIONS RECEIVED ===")
 					printSummary(&mu, results, queued, replied)
-					stop()
+					cancelFn()
 					return
 				}
 				fmt.Printf("  ... %d commands still pending confirmation\n", remaining)
@@ -321,18 +315,40 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("ADMS Probe Server listening on %s\n", *addr)
-	fmt.Printf("Device: %s\n", *sn)
+	fmt.Printf("ADMS Probe Server listening on %s\n", addr)
+	fmt.Printf("Device: %s\n", sn)
 	fmt.Println("Endpoints: /iclock/* (ADMS protocol)")
 	fmt.Println()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Print(err)
-		return
+		return err
 	}
 
 	// Final summary.
 	printSummary(&mu, results, queued, replied)
+	return nil
+}
+
+// logHandler wraps an http.Handler with request logging middleware.
+func logHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Capture the body for POST requests.
+		var bodyStr string
+		if r.Method == http.MethodPost && r.Body != nil {
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err == nil {
+				bodyStr = string(bodyBytes)
+				// Put the body back for the actual handler.
+				r.Body = io.NopCloser(strings.NewReader(bodyStr))
+			}
+		}
+		query := r.URL.RawQuery
+		if len(bodyStr) > 200 {
+			bodyStr = bodyStr[:200] + "...(truncated)"
+		}
+		fmt.Printf("  >>> %s %s?%s  body=%q\n", r.Method, r.URL.Path, query, bodyStr)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func printSummary(mu *sync.Mutex, results []result, queued []candidate, replied int) {
