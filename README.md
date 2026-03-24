@@ -473,17 +473,28 @@ Endpoints:
 | GET | `/api/devices/{sn}` | Device detail |
 | POST | `/api/devices/{sn}/reboot` | Reboot device |
 | POST | `/api/devices/{sn}/info` | Request device info |
+| POST | `/api/devices/{sn}/check` | Heartbeat / connectivity check |
 | POST | `/api/devices/{sn}/sync-time` | Sync device clock |
 | POST | `/api/devices/{sn}/clear-data` | Clear attendance data |
 | POST | `/api/devices/{sn}/clear-log` | Clear operation log |
 | POST | `/api/devices/{sn}/users` | Add/update user (JSON body) |
 | POST | `/api/devices/{sn}/users/delete` | Delete user (JSON body) |
+| POST | `/api/devices/{sn}/users/query` | Query all users from device |
 | POST | `/api/devices/{sn}/open-door` | Trigger door relay |
+| POST | `/api/devices/{sn}/get-option` | Get device option (JSON body) |
+| POST | `/api/devices/{sn}/shell` | Execute shell command (JSON body) |
+| POST | `/api/devices/{sn}/log` | Request log data |
 | POST | `/api/devices/{sn}/command` | Send raw command (JSON body) |
 
 Example curl usage:
 
 ```bash
+# Request device info
+curl -X POST http://localhost:8080/api/devices/<SN>/info
+
+# Heartbeat check
+curl -X POST http://localhost:8080/api/devices/<SN>/check
+
 # Add a user
 curl -X POST http://localhost:8080/api/devices/<SN>/users \
      -H 'Content-Type: application/json' \
@@ -494,16 +505,29 @@ curl -X POST http://localhost:8080/api/devices/<SN>/users/delete \
      -H 'Content-Type: application/json' \
      -d '{"pin":"1001"}'
 
+# Query all users from device (data pushed via /iclock/cdata)
+curl -X POST http://localhost:8080/api/devices/<SN>/users/query
+
+# Get a device option
+curl -X POST http://localhost:8080/api/devices/<SN>/get-option \
+     -H 'Content-Type: application/json' \
+     -d '{"key":"DeviceName"}'
+
+# Execute a shell command on the device (use with caution!)
+curl -X POST http://localhost:8080/api/devices/<SN>/shell \
+     -H 'Content-Type: application/json' \
+     -d '{"command":"date"}'
+
+# Request log data
+curl -X POST http://localhost:8080/api/devices/<SN>/log
+
 # Reboot device
 curl -X POST http://localhost:8080/api/devices/<SN>/reboot
-
-# Request device info
-curl -X POST http://localhost:8080/api/devices/<SN>/info
 
 # Send a raw command
 curl -X POST http://localhost:8080/api/devices/<SN>/command \
      -H 'Content-Type: application/json' \
-     -d '{"command":"CHECK"}'
+     -d '{"command":"GET OPTION FROM FWVersion"}'
 ```
 
 ## Testing
