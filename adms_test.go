@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,11 @@ import (
 	"testing"
 	"time"
 )
+
+// errReader is an io.Reader that always returns an error.
+type errReader struct{ err error }
+
+func (r errReader) Read([]byte) (int, error) { return 0, r.err }
 
 func TestNewADMSServer(t *testing.T) {
 	server := NewADMSServer()
@@ -2592,5 +2598,1032 @@ func TestCommandResultType(t *testing.T) {
 	}
 	if r.Command != "DATA" {
 		t.Errorf("unexpected Command: %s", r.Command)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// readBody coverage
+// ---------------------------------------------------------------------------
+
+func TestReadBody_MaxBytesError(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	body := strings.Repeat("x", 100) // well over 10 bytes
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	_, err := server.readBody(w, req)
+	if err == nil {
+		t.Fatal("expected error for oversized body")
+	}
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestReadBody_GenericReadError(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/", io.NopCloser(errReader{err: errors.New("disk failure")}))
+	w := httptest.NewRecorder()
+
+	_, err := server.readBody(w, req)
+	if err == nil {
+		t.Fatal("expected error for read failure")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bodyPreview coverage
+// ---------------------------------------------------------------------------
+
+func TestBodyPreview_Truncation(t *testing.T) {
+	long := strings.Repeat("A", maxBodyPreviewLen+50)
+	got := bodyPreview([]byte(long))
+
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected truncated preview to end with '...', got %q", got)
+	}
+	if len(got) != maxBodyPreviewLen+3 { // 200 chars + "..."
+		t.Errorf("expected length %d, got %d", maxBodyPreviewLen+3, len(got))
+	}
+}
+
+func TestBodyPreview_Short(t *testing.T) {
+	short := "hello"
+	got := bodyPreview([]byte(short))
+	if got != short {
+		t.Errorf("expected %q, got %q", short, got)
+	}
+}
+
+func TestBodyPreview_ExactBoundary(t *testing.T) {
+	exact := strings.Repeat("B", maxBodyPreviewLen)
+	got := bodyPreview([]byte(exact))
+	if got != exact {
+		t.Errorf("body at exact boundary should not be truncated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchAttendance coverage
+// ---------------------------------------------------------------------------
+
+func TestDispatchAttendance_EmptyRecords(t *testing.T) {
+	called := false
+	server := NewADMSServer(WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {
+		called = true
+	}))
+	defer server.Close()
+
+	ok := server.dispatchAttendance(nil)
+	if !ok {
+		t.Error("dispatchAttendance should return true for empty records")
+	}
+	if called {
+		t.Error("callback should not be called for empty records")
+	}
+}
+
+func TestDispatchAttendance_CallbackQueueFull(t *testing.T) {
+	// Create server with tiny buffer and a blocking callback.
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {
+			<-blocker // block forever until test is done
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	record := AttendanceRecord{
+		SerialNumber: "DEV001",
+		UserID:       "1",
+		Timestamp:    time.Now(),
+	}
+
+	// Fill the callback channel.
+	server.dispatchAttendance([]AttendanceRecord{record})
+	// Give the worker a moment to pick up the first callback and block.
+	time.Sleep(50 * time.Millisecond)
+
+	// This should fill the channel.
+	server.dispatchAttendance([]AttendanceRecord{record})
+
+	// Now the channel is full and the worker is blocked — next dispatch should fail.
+	ok := server.dispatchAttendance([]AttendanceRecord{record})
+	if ok {
+		t.Error("expected dispatch to fail when callback queue is full")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// registerOrReject coverage
+// ---------------------------------------------------------------------------
+
+func TestRegisterOrReject_InvalidSerialNumber(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	w := httptest.NewRecorder()
+	ok := server.registerOrReject(w, "!!!invalid!!!")
+	if ok {
+		t.Error("expected registerOrReject to return false for invalid SN")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestRegisterOrReject_DeviceLimitReached(t *testing.T) {
+	server := NewADMSServer(WithMaxDevices(1))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	ok := server.registerOrReject(w, "DEV002")
+	if ok {
+		t.Error("expected registerOrReject to return false when limit reached")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleCData coverage — body too large, callback queue full
+// ---------------------------------------------------------------------------
+
+func TestHandleCData_ATTLOG_BodyTooLarge(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	body := strings.Repeat("x", 100)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestHandleCData_ATTLOG_CallbackQueueFull(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {
+			<-blocker
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	attlog := "1\t2025-01-01 08:00:00\t1\t0\t0\t0"
+
+	// Fill the callback channel.
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(attlog))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	time.Sleep(50 * time.Millisecond) // let worker pick up and block
+
+	// Fill remaining channel capacity.
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(attlog))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	// Now queue should be full — next should fail.
+	req3 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(attlog))
+	w3 := httptest.NewRecorder()
+	server.HandleCData(w3, req3)
+
+	if w3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when callback queue is full, got %d", w3.Code)
+	}
+}
+
+func TestHandleCData_DefaultTable_DeviceInfoQueueFull(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnDeviceInfo(func(_ context.Context, _ string, _ map[string]string) {
+			<-blocker
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	infoBody := "~DeviceName=TestDev\nMAC=00:11:22:33:44:55"
+
+	// First dispatch — the worker picks it up and blocks.
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001", strings.NewReader(infoBody))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Fill remaining buffer capacity.
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001", strings.NewReader(infoBody))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	// This dispatch should fail (queue full), but HandleCData still returns OK
+	// because device info dispatch failure is non-fatal (just logged as a warning).
+	req3 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001", strings.NewReader(infoBody))
+	w3 := httptest.NewRecorder()
+	server.HandleCData(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200 (device info queue-full is non-fatal), got %d", w3.Code)
+	}
+}
+
+func TestHandleCData_DefaultTable_BodyTooLarge(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	body := strings.Repeat("x", 100)
+	// POST to default table (no table param) triggers the info/command path.
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleDeviceCmd coverage — body too large, callback queue full
+// ---------------------------------------------------------------------------
+
+func TestHandleDeviceCmd_BodyTooLarge(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	body := strings.Repeat("x", 100)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=DEV001", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestHandleDeviceCmd_CallbackQueueFull(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnCommandResult(func(_ context.Context, _ CommandResult) {
+			<-blocker
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	body := "ID=1&Return=0&CMD=INFO"
+
+	// First call — worker picks up and blocks.
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=DEV001", strings.NewReader(body))
+	w1 := httptest.NewRecorder()
+	server.HandleDeviceCmd(w1, req1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Fill remaining capacity.
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=DEV001", strings.NewReader(body))
+	w2 := httptest.NewRecorder()
+	server.HandleDeviceCmd(w2, req2)
+
+	// Next dispatch should fail (queue full) — but handler still returns OK.
+	req3 := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=DEV001", strings.NewReader(body))
+	w3 := httptest.NewRecorder()
+	server.HandleDeviceCmd(w3, req3)
+
+	// HandleDeviceCmd always responds OK regardless of queue status.
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w3.Code)
+	}
+}
+
+func TestHandleDeviceCmd_MethodNotAllowed(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/devicecmd?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleDeviceCmd_MissingSN(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd", strings.NewReader("ID=1&Return=0&CMD=INFO"))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing SN, got %d", w.Code)
+	}
+}
+
+func TestHandleDeviceCmd_EmptyBody(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/devicecmd?SN=DEV001", strings.NewReader(""))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "OK" {
+		t.Errorf("expected OK, got %q", w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// updateDeviceActivity coverage — unknown device
+// ---------------------------------------------------------------------------
+
+func TestUpdateDeviceActivity_UnknownDevice(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	// Should not panic; it's a no-op for unknown devices.
+	server.updateDeviceActivity("UNKNOWN123")
+}
+
+// ---------------------------------------------------------------------------
+// ParseQueryParams coverage — invalid URL
+// ---------------------------------------------------------------------------
+
+func TestParseQueryParams_InvalidURL(t *testing.T) {
+	_, err := ParseQueryParams("://bad url")
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestParseQueryParams_EmptyQueryValue(t *testing.T) {
+	params, err := ParseQueryParams("http://host/path?key=")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, ok := params["key"]; !ok || v != "" {
+		t.Errorf("expected key with empty value, got %q (ok=%v)", v, ok)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleRegistry coverage — body too large, callback queue full
+// ---------------------------------------------------------------------------
+
+func TestHandleRegistry_BodyTooLarge(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	body := strings.Repeat("x", 100)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/registry?SN=DEV001", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestHandleRegistry_CallbackQueueFull(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnRegistry(func(_ context.Context, _ string, _ map[string]string) {
+			<-blocker
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	regBody := "~DeviceName=TestDev,MAC=00:11:22:33:44:55"
+
+	// Fill the callback channel.
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/registry?SN=DEV001", strings.NewReader(regBody))
+	w1 := httptest.NewRecorder()
+	server.HandleRegistry(w1, req1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/registry?SN=DEV001", strings.NewReader(regBody))
+	w2 := httptest.NewRecorder()
+	server.HandleRegistry(w2, req2)
+
+	// Should still return OK (registry queue-full is non-fatal).
+	req3 := httptest.NewRequest(http.MethodPost,
+		"/iclock/registry?SN=DEV001", strings.NewReader(regBody))
+	w3 := httptest.NewRecorder()
+	server.HandleRegistry(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w3.Code)
+	}
+}
+
+func TestHandleRegistry_MethodNotAllowed(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodDelete, "/iclock/registry?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleRegistry_MissingSN(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/registry", nil)
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing SN, got %d", w.Code)
+	}
+}
+
+func TestHandleRegistry_EmptyBody(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/iclock/registry?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleRegistry(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "OK" {
+		t.Errorf("expected OK, got %q", w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleInspect coverage — POST rejection, with devices
+// ---------------------------------------------------------------------------
+
+func TestHandleInspect_MethodNotAllowed(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleInspect_WithDevices(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	// Touch activity so the device appears online.
+	server.updateDeviceActivity("DEV001")
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var snapshot struct {
+		Devices []DeviceSnapshot `json:"devices"`
+		Count   int              `json:"count"`
+		Time    string           `json:"time"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("failed to decode inspect response: %v", err)
+	}
+	if snapshot.Count != 1 {
+		t.Errorf("expected 1 device, got %d", snapshot.Count)
+	}
+	if len(snapshot.Devices) != 1 {
+		t.Fatalf("expected 1 device in array, got %d", len(snapshot.Devices))
+	}
+	if snapshot.Devices[0].Serial != "DEV001" {
+		t.Errorf("expected serial DEV001, got %q", snapshot.Devices[0].Serial)
+	}
+	if !snapshot.Devices[0].Online {
+		t.Error("expected device to be online after updateDeviceActivity")
+	}
+}
+
+func TestHandleInspect_EmptyDeviceList(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var snapshot struct {
+		Devices []DeviceSnapshot `json:"devices"`
+		Count   int              `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if snapshot.Count != 0 {
+		t.Errorf("expected 0 devices, got %d", snapshot.Count)
+	}
+	if snapshot.Devices == nil {
+		t.Error("expected non-nil empty devices array")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleCData coverage — method not allowed, missing SN, GET with commands
+// ---------------------------------------------------------------------------
+
+func TestHandleCData_MethodNotAllowed(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodDelete, "/iclock/cdata?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleCData_DefaultTable_GET_WithPendingCommands(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	if err := server.QueueCommand("DEV001", "CHECK"); err != nil {
+		t.Fatalf("QueueCommand: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "C:1:CHECK") {
+		t.Errorf("expected response to contain C:1:CHECK, got %q", w.Body.String())
+	}
+}
+
+func TestHandleCData_DefaultTable_GET_NoCommands(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "OK" {
+		t.Errorf("expected OK, got %q", w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HandleGetRequest coverage — method not allowed, missing SN
+// ---------------------------------------------------------------------------
+
+func TestHandleGetRequest_MethodNotAllowed(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/iclock/getrequest?SN=DEV001", nil)
+	w := httptest.NewRecorder()
+	server.HandleGetRequest(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleGetRequest_MissingSN(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/getrequest", nil)
+	w := httptest.NewRecorder()
+	server.HandleGetRequest(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing SN, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ServeHTTP routing coverage — unknown path
+// ---------------------------------------------------------------------------
+
+func TestServeHTTP_UnknownPath(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/unknown", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown path, got %d", w.Code)
+	}
+}
+
+func TestServeHTTP_InspectDisabled(t *testing.T) {
+	// Inspect is disabled by default.
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when inspect disabled, got %d", w.Code)
+	}
+}
+
+func TestServeHTTP_InspectEnabled(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 when inspect enabled, got %d", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchCommandResult — no callback configured (short-circuit)
+// ---------------------------------------------------------------------------
+
+func TestDispatchCommandResult_NilCallback(t *testing.T) {
+	server := NewADMSServer() // no WithOnCommandResult
+	defer server.Close()
+
+	ok := server.dispatchCommandResult(CommandResult{ID: 1, Command: "INFO"})
+	if !ok {
+		t.Error("dispatchCommandResult should return true when no callback configured")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dispatchCallback — closed server
+// ---------------------------------------------------------------------------
+
+func TestDispatchCallback_AfterClose(t *testing.T) {
+	server := NewADMSServer()
+	server.Close()
+
+	ok := server.dispatchCallback(func() {})
+	if ok {
+		t.Error("dispatchCallback should return false after server close")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// requireDevice — invalid SN in query
+// ---------------------------------------------------------------------------
+
+func TestRequireDevice_InvalidSN(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/cdata?SN=!!!", nil)
+	w := httptest.NewRecorder()
+	sn, ok := server.requireDevice(w, req)
+	if ok {
+		t.Error("expected requireDevice to return false for invalid SN")
+	}
+	if sn != "" {
+		t.Errorf("expected empty SN, got %q", sn)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// VerifyModeName coverage
+// ---------------------------------------------------------------------------
+
+func TestVerifyModeName_AllModes(t *testing.T) {
+	tests := []struct {
+		mode int
+		want string
+	}{
+		{0, "Password"},
+		{1, "Fingerprint"},
+		{2, "Card"},
+		{9, "Other"},
+		{15, "Face"},
+		{25, "Palm"},
+		{99, "Unknown (99)"},
+		{-1, "Unknown (-1)"},
+	}
+	for _, tt := range tests {
+		got := VerifyModeName(tt.mode)
+		if got != tt.want {
+			t.Errorf("VerifyModeName(%d) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Multiple commands in writeCommandsOrOK
+// ---------------------------------------------------------------------------
+
+func TestWriteCommandsOrOK_MultipleCommands(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	for _, cmd := range []string{"INFO", "CHECK", "REBOOT"} {
+		if err := server.QueueCommand("DEV001", cmd); err != nil {
+			t.Fatalf("QueueCommand(%q): %v", cmd, err)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	server.writeCommandsOrOK(w, "DEV001")
+
+	body := w.Body.String()
+	if !strings.Contains(body, "C:1:INFO\n") {
+		t.Errorf("expected C:1:INFO in response, got %q", body)
+	}
+	if !strings.Contains(body, "C:2:CHECK\n") {
+		t.Errorf("expected C:2:CHECK in response, got %q", body)
+	}
+	if !strings.Contains(body, "C:3:REBOOT\n") {
+		t.Errorf("expected C:3:REBOOT in response, got %q", body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent dispatch and close
+// ---------------------------------------------------------------------------
+
+func TestConcurrentDispatchAndClose(t *testing.T) {
+	server := NewADMSServer(
+		WithCallbackBufferSize(10),
+		WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {}),
+		WithOnCommandResult(func(_ context.Context, _ CommandResult) {}),
+	)
+
+	record := AttendanceRecord{UserID: "1", Timestamp: time.Now(), SerialNumber: "DEV001"}
+	result := CommandResult{ID: 1, Command: "INFO"}
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() {
+			server.dispatchAttendance([]AttendanceRecord{record})
+		})
+		wg.Go(func() {
+			server.dispatchCommandResult(result)
+		})
+	}
+
+	// Close while dispatches are in flight.
+	server.Close()
+	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// dispatchCallback slow-path: channel full, then space freed before timeout
+// ---------------------------------------------------------------------------
+
+func TestDispatchCallback_SlowPathSuccess(t *testing.T) {
+	// Buffer of 1 + a consumer that drains slowly.
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(2*time.Second),
+		WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {
+			time.Sleep(100 * time.Millisecond)
+		}),
+	)
+	defer server.Close()
+
+	record := AttendanceRecord{UserID: "1", Timestamp: time.Now(), SerialNumber: "DEV001"}
+
+	// First dispatch: enters the channel immediately.
+	ok1 := server.dispatchAttendance([]AttendanceRecord{record})
+	if !ok1 {
+		t.Fatal("first dispatch should succeed")
+	}
+
+	// Second dispatch: channel is full, but the worker will drain it
+	// within the 2s timeout, so this should succeed via the slow-path.
+	ok2 := server.dispatchAttendance([]AttendanceRecord{record})
+	if !ok2 {
+		t.Fatal("second dispatch should succeed via slow-path")
+	}
+}
+
+func TestDispatchCallback_CloseWhileWaiting(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(5*time.Second),
+		WithOnAttendance(func(_ context.Context, _ AttendanceRecord) {
+			<-blocker
+		}),
+	)
+
+	record := AttendanceRecord{UserID: "1", Timestamp: time.Now(), SerialNumber: "DEV001"}
+
+	// Fill channel.
+	server.dispatchAttendance([]AttendanceRecord{record})
+	time.Sleep(50 * time.Millisecond) // let worker pick up and block
+
+	// Fill remaining channel capacity.
+	server.dispatchAttendance([]AttendanceRecord{record})
+
+	// Dispatch in a goroutine — it will enter the slow-path and block.
+	done := make(chan bool, 1)
+	go func() {
+		ok := server.dispatchAttendance([]AttendanceRecord{record})
+		done <- ok
+	}()
+
+	// Give it a moment to enter the slow-path select, then close the server.
+	time.Sleep(50 * time.Millisecond)
+	close(blocker)
+	server.Close()
+
+	select {
+	case ok := <-done:
+		// Either false (server closed) or true (space freed) — both are valid.
+		_ = ok
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch goroutine did not return after server close")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// updateDeviceActivity — offline-to-online transition
+// ---------------------------------------------------------------------------
+
+func TestUpdateDeviceActivity_OfflineToOnline(t *testing.T) {
+	server := NewADMSServer(WithOnlineThreshold(100 * time.Millisecond))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	// RegisterDevice sets LastActivity to time.Now(), so the device starts online.
+	if !server.IsDeviceOnline("DEV001") {
+		t.Fatal("device should be online immediately after registration")
+	}
+
+	// Wait for the threshold to expire so the device goes offline.
+	time.Sleep(150 * time.Millisecond)
+
+	if server.IsDeviceOnline("DEV001") {
+		t.Fatal("device should be offline after threshold expiry")
+	}
+
+	// Touch activity — triggers the offline→online transition (covers the log path).
+	server.updateDeviceActivity("DEV001")
+
+	if !server.IsDeviceOnline("DEV001") {
+		t.Error("device should be online after updateDeviceActivity")
+	}
+
+	// Let it expire again, then touch once more to exercise the path a second time.
+	time.Sleep(150 * time.Millisecond)
+
+	if server.IsDeviceOnline("DEV001") {
+		t.Fatal("device should be offline after second threshold expiry")
+	}
+
+	server.updateDeviceActivity("DEV001")
+
+	if !server.IsDeviceOnline("DEV001") {
+		t.Error("device should be online again after second updateDeviceActivity")
 	}
 }

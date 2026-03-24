@@ -1296,6 +1296,24 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// Send command confirmation (Return=0) — triggers WithOnCommandResult callback (OK path).
+	cmdResult := "ID=1&Return=0&CMD=INFO"
+	resp, err = http.Post(base+"/iclock/devicecmd?SN=DEV001",
+		"text/plain", strings.NewReader(cmdResult))
+	if err != nil {
+		t.Fatalf("POST devicecmd (OK) failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Send command confirmation (Return=-1002) — triggers WithOnCommandResult FAIL path.
+	cmdResultFail := "ID=2&Return=-1002&CMD=BAD"
+	resp, err = http.Post(base+"/iclock/devicecmd?SN=DEV001",
+		"text/plain", strings.NewReader(cmdResultFail))
+	if err != nil {
+		t.Fatalf("POST devicecmd (FAIL) failed: %v", err)
+	}
+	resp.Body.Close()
+
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 
@@ -1306,5 +1324,17 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return within 5s")
+	}
+}
+
+// TestRun_InvalidDevice exercises the RegisterDevice error path in run()
+// when an invalid serial number is passed.
+func TestRun_InvalidDevice(t *testing.T) {
+	err := run(t.Context(), ":0", []string{"INVALID DEVICE!"})
+	if err == nil {
+		t.Fatal("expected error for invalid device serial number")
+	}
+	if !strings.Contains(err.Error(), "register device") {
+		t.Errorf("expected 'register device' in error, got: %v", err)
 	}
 }
