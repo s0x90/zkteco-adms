@@ -181,7 +181,7 @@ zkadms.WithOnCommandResult(func(ctx context.Context, result zkadms.CommandResult
     // result.SerialNumber - Device that executed the command
     // result.ID           - Command ID assigned by the server
     // result.ReturnCode   - 0 = success, non-zero = error
-    // result.Command      - Command type echoed back (e.g. "USER ADD")
+    // result.Command      - Command type echoed back (e.g. "INFO", "DATA")
 })
 ```
 
@@ -282,8 +282,8 @@ Where `<ID>` is a monotonically increasing integer assigned by the server. For e
 
 ```
 C:1:INFO
-C:2:USER ADD PIN=1001	Name=John Doe	Privilege=0	Card=12345678
-C:3:USER DEL PIN=1001
+C:2:DATA UPDATE USERINFO PIN=1001	Name=John Doe	Privilege=0	Card=12345678
+C:3:DATA DELETE USERINFO PIN=1001
 ```
 
 After executing a command, the device POSTs the result to `/iclock/devicecmd` with a body like:
@@ -516,8 +516,8 @@ Creates a new ADMS server instance configured with the given options.
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
 | `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
 | `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
-| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a USER ADD command (ADMS protocol) |
-| `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a USER DEL command (ADMS protocol) |
+| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a DATA UPDATE USERINFO command |
+| `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a DATA DELETE USERINFO command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |

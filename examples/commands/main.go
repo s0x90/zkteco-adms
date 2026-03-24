@@ -384,7 +384,7 @@ func handleClearLog(server *zkadms.ADMSServer) http.Handler {
 	})
 }
 
-// handleAddUser queues a USER ADD command to add or update a user on
+// handleAddUser queues a DATA UPDATE USERINFO command to add or update a user on
 // the device. Expects a JSON body with pin, name, privilege, and card fields.
 func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +412,7 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 	})
 }
 
-// handleDeleteUser queues a USER DEL command to remove a user from
+// handleDeleteUser queues a DATA DELETE USERINFO command to remove a user from
 // the device. Expects a JSON body with a pin field.
 func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

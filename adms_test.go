@@ -105,7 +105,7 @@ func TestQueueAndGetCommands(t *testing.T) {
 	if err := server.QueueCommand(serialNumber, "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
-	if err := server.QueueCommand(serialNumber, "USER ADD PIN=1001\tName=Test\tPrivilege=0\tCard="); err != nil {
+	if err := server.QueueCommand(serialNumber, "DATA UPDATE USERINFO PIN=1001\tName=Test\tPrivilege=0\tCard="); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
@@ -116,8 +116,8 @@ func TestQueueAndGetCommands(t *testing.T) {
 	if commands[0] != "INFO" {
 		t.Errorf("Expected first command to be INFO, got %s", commands[0])
 	}
-	if commands[1] != "USER ADD PIN=1001\tName=Test\tPrivilege=0\tCard=" {
-		t.Errorf("Expected second command to be USER ADD, got %s", commands[1])
+	if commands[1] != "DATA UPDATE USERINFO PIN=1001\tName=Test\tPrivilege=0\tCard=" {
+		t.Errorf("Expected second command to be DATA UPDATE USERINFO, got %s", commands[1])
 	}
 
 	// Queue should be cleared after retrieval
@@ -267,7 +267,7 @@ func TestHandleGetRequest(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	if err := server.QueueCommand(serialNumber, "USER DEL PIN=1001"); err != nil {
+	if err := server.QueueCommand(serialNumber, "DATA DELETE USERINFO PIN=1001"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestHandleGetRequest(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if want := "C:1:USER DEL PIN=1001\n"; w.Body.String() != want {
+	if want := "C:1:DATA DELETE USERINFO PIN=1001\n"; w.Body.String() != want {
 		t.Errorf("Expected response %q, got: %q", want, w.Body.String())
 	}
 }
@@ -749,7 +749,7 @@ func TestSendUserAddCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
-	want := "USER ADD PIN=1001\tName=John Doe\tPrivilege=0\tCard=12345678"
+	want := "DATA UPDATE USERINFO PIN=1001\tName=John Doe\tPrivilege=0\tCard=12345678"
 	if commands[0] != want {
 		t.Errorf("Expected command %q, got %q", want, commands[0])
 	}
@@ -768,7 +768,7 @@ func TestSendUserDeleteCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
-	want := "USER DEL PIN=1001"
+	want := "DATA DELETE USERINFO PIN=1001"
 	if commands[0] != want {
 		t.Errorf("Expected command %q, got %q", want, commands[0])
 	}
@@ -2445,7 +2445,7 @@ func TestHandleDeviceCmd_Confirmation(t *testing.T) {
 	)
 	defer server.Close()
 
-	body := "ID=42&Return=0&CMD=USER ADD"
+	body := "ID=42&Return=0&CMD=DATA"
 	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=CONF001", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 
@@ -2469,8 +2469,8 @@ func TestHandleDeviceCmd_Confirmation(t *testing.T) {
 		if result.ReturnCode != 0 {
 			t.Errorf("expected ReturnCode 0, got %d", result.ReturnCode)
 		}
-		if result.Command != "USER ADD" {
-			t.Errorf("expected Command USER ADD, got %s", result.Command)
+		if result.Command != "DATA" {
+			t.Errorf("expected Command DATA, got %s", result.Command)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for command result callback")
@@ -2579,7 +2579,7 @@ func TestCommandResultType(t *testing.T) {
 		SerialNumber: "DEV001",
 		ID:           42,
 		ReturnCode:   0,
-		Command:      "USER ADD",
+		Command:      "DATA",
 	}
 	if r.SerialNumber != "DEV001" {
 		t.Errorf("unexpected SerialNumber: %s", r.SerialNumber)
@@ -2590,7 +2590,7 @@ func TestCommandResultType(t *testing.T) {
 	if r.ReturnCode != 0 {
 		t.Errorf("unexpected ReturnCode: %d", r.ReturnCode)
 	}
-	if r.Command != "USER ADD" {
+	if r.Command != "DATA" {
 		t.Errorf("unexpected Command: %s", r.Command)
 	}
 }

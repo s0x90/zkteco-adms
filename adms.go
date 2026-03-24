@@ -1230,27 +1230,35 @@ func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
 	return s.QueueCommand(serialNumber, "INFO")
 }
 
-// SendUserAddCommand queues a USER ADD command to add or update a user on
-// the device. This follows the ADMS protocol format where the server sends
-// tab-separated user data:
+// SendUserAddCommand queues a DATA UPDATE USERINFO command to add or update
+// a user on the device. The wire format uses tab-separated key=value pairs:
 //
-//	USER ADD PIN=<pin>\tName=<name>\tPrivilege=<privilege>\tCard=<card>
+//	DATA UPDATE USERINFO PIN=<pin>\tName=<name>\tPrivilege=<privilege>\tCard=<card>
 //
 // Privilege values: 0 = normal user, 14 = admin.
+//
+// Note: the ADMS datasheet documents this as "USER ADD", but real devices
+// (e.g. ZAM180-NF firmware) require the DATA UPDATE USERINFO prefix instead.
+// The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
+//
 // It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error {
-	cmd := fmt.Sprintf("USER ADD PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
+	cmd := fmt.Sprintf("DATA UPDATE USERINFO PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
 	return s.QueueCommand(serialNumber, cmd)
 }
 
-// SendUserDeleteCommand queues a USER DEL command to remove a user from the
-// device. This follows the ADMS protocol format:
+// SendUserDeleteCommand queues a DATA DELETE USERINFO command to remove a user
+// from the device. The wire format is:
 //
-//	USER DEL PIN=<pin>
+//	DATA DELETE USERINFO PIN=<pin>
+//
+// Note: the ADMS datasheet documents this as "USER DEL", but real devices
+// (e.g. ZAM180-NF firmware) require the DATA DELETE USERINFO prefix instead.
+// The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
 //
 // It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
-	cmd := fmt.Sprintf("USER DEL PIN=%s", pin)
+	cmd := fmt.Sprintf("DATA DELETE USERINFO PIN=%s", pin)
 	return s.QueueCommand(serialNumber, cmd)
 }
 
