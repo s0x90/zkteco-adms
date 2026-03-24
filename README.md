@@ -350,6 +350,55 @@ Then configure your ZKTeco device to connect to:
 http://your-server:8080/iclock/
 ```
 
+#### Commands Example
+
+The commands example exposes a REST API for managing devices:
+
+```bash
+go run ./examples/commands -devices ABCD12345678
+```
+
+Endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/devices` | List all connected devices |
+| GET | `/api/devices/{sn}` | Device detail |
+| POST | `/api/devices/{sn}/reboot` | Reboot device |
+| POST | `/api/devices/{sn}/info` | Request device info |
+| POST | `/api/devices/{sn}/sync-time` | Sync device clock |
+| POST | `/api/devices/{sn}/clear-data` | Clear attendance data |
+| POST | `/api/devices/{sn}/clear-log` | Clear operation log |
+| POST | `/api/devices/{sn}/users` | Add/update user (JSON body) |
+| POST | `/api/devices/{sn}/users/delete` | Delete user (JSON body) |
+| POST | `/api/devices/{sn}/open-door` | Trigger door relay |
+| POST | `/api/devices/{sn}/command` | Send raw command (JSON body) |
+
+Example curl usage:
+
+```bash
+# Add a user
+curl -X POST http://localhost:8080/api/devices/<SN>/users \
+     -H 'Content-Type: application/json' \
+     -d '{"pin":"1001","name":"John Doe","privilege":0,"card":"12345678"}'
+
+# Delete a user
+curl -X POST http://localhost:8080/api/devices/<SN>/users/delete \
+     -H 'Content-Type: application/json' \
+     -d '{"pin":"1001"}'
+
+# Reboot device
+curl -X POST http://localhost:8080/api/devices/<SN>/reboot
+
+# Request device info
+curl -X POST http://localhost:8080/api/devices/<SN>/info
+
+# Send a raw command
+curl -X POST http://localhost:8080/api/devices/<SN>/command \
+     -H 'Content-Type: application/json' \
+     -d '{"command":"CHECK"}'
+```
+
 ## Testing
 
 Run the test suite:
