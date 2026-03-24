@@ -219,6 +219,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
+
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Write(body)
@@ -247,6 +252,11 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
+
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusOK)
@@ -259,9 +269,9 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large body; got: %s", dumpOutput)
 	}
 }
 
@@ -270,6 +280,11 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
 
 	largeResp := strings.Repeat("B", maxLogBody+500)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -282,9 +297,9 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large response body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large response body; got: %s", dumpOutput)
 	}
 }
 

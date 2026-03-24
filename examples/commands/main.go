@@ -26,6 +26,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -36,6 +37,11 @@ import (
 
 // maxLogBody is the maximum number of bytes logged for request/response bodies.
 const maxLogBody = 1024
+
+// dumpWriter is the destination for multi-line HTTP dump output. Defaults to
+// os.Stderr so that dump blocks render with real newlines in the console.
+// Tests may reassign this to capture output.
+var dumpWriter io.Writer = os.Stderr
 
 // statusRecorder wraps http.ResponseWriter to capture the status code and
 // response body for debug logging.
@@ -167,8 +173,8 @@ func logMiddleware(next http.Handler) http.Handler {
 					"status", rec.status,
 					"duration", elapsed,
 					"panic", panicVal,
-					"dump", buf.String(),
 				)
+				fmt.Fprint(dumpWriter, buf.String())
 				panic(panicVal) // re-panic for upstream recovery
 			}
 
@@ -177,8 +183,8 @@ func logMiddleware(next http.Handler) http.Handler {
 				"path", fullPath,
 				"status", rec.status,
 				"duration", elapsed,
-				"dump", buf.String(),
 			)
+			fmt.Fprint(dumpWriter, buf.String())
 		}()
 
 		next.ServeHTTP(rec, r)
@@ -639,7 +645,7 @@ func run(ctx context.Context, addr string, devices []string) error {
 }
 
 func main() {
-	addr := flag.String("addr", ":8081", "HTTP listen address")
+	addr := flag.String("addr", ":8080", "HTTP listen address")
 	devicesFlag := flag.String("devices", "", "comma-separated device serial numbers to pre-register")
 	flag.Parse()
 
