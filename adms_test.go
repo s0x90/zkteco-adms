@@ -2227,11 +2227,12 @@ func TestDefaultMaxDevices(t *testing.T) {
 
 // --- Phase 3 (continued): Command ID tracking and confirmation tests ---
 
-func TestParseCommandResult(t *testing.T) {
+func TestParseCommandResults(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
-	tests := []struct {
+	// Single-result test cases (expect exactly 1 result).
+	singleTests := []struct {
 		name       string
 		body       string
 		wantID     int64
@@ -2246,39 +2247,11 @@ func TestParseCommandResult(t *testing.T) {
 			wantCmd:    "USER ADD",
 		},
 		{
-			name:       "newline separated",
-			body:       "ID=7\nReturn=1\nCMD=REBOOT",
-			wantID:     7,
-			wantReturn: 1,
-			wantCmd:    "REBOOT",
-		},
-		{
-			name:       "mixed separators",
-			body:       "ID=3&Return=0\nCMD=INFO",
-			wantID:     3,
-			wantReturn: 0,
-			wantCmd:    "INFO",
-		},
-		{
 			name:       "extra whitespace",
 			body:       " ID = 10 & Return = 0 & CMD = USER DEL ",
 			wantID:     10,
 			wantReturn: 0,
 			wantCmd:    "USER DEL",
-		},
-		{
-			name:       "empty body",
-			body:       "",
-			wantID:     0,
-			wantReturn: 0,
-			wantCmd:    "",
-		},
-		{
-			name:       "missing ID field",
-			body:       "Return=0&CMD=INFO",
-			wantID:     0,
-			wantReturn: 0,
-			wantCmd:    "INFO",
 		},
 		{
 			name:       "missing Return field",
@@ -2293,13 +2266,6 @@ func TestParseCommandResult(t *testing.T) {
 			wantID:     5,
 			wantReturn: 2,
 			wantCmd:    "",
-		},
-		{
-			name:       "non-numeric ID ignored",
-			body:       "ID=abc&Return=0&CMD=INFO",
-			wantID:     0,
-			wantReturn: 0,
-			wantCmd:    "INFO",
 		},
 		{
 			name:       "non-numeric Return ignored",
@@ -2322,11 +2288,29 @@ func TestParseCommandResult(t *testing.T) {
 			wantReturn: 0,
 			wantCmd:    "INFO",
 		},
+		{
+			name:       "trailing newline",
+			body:       "ID=7&Return=0&CMD=CHECK\n",
+			wantID:     7,
+			wantReturn: 0,
+			wantCmd:    "CHECK",
+		},
+		{
+			name:       "negative return code",
+			body:       "ID=3&Return=-1002&CMD=DATA",
+			wantID:     3,
+			wantReturn: -1002,
+			wantCmd:    "DATA",
+		},
 	}
 
-	for _, tc := range tests {
+	for _, tc := range singleTests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := server.parseCommandResult(tc.body, "DEV001")
+			results := server.parseCommandResults(tc.body, "DEV001")
+			if len(results) != 1 {
+				t.Fatalf("expected 1 result, got %d", len(results))
+			}
+			result := results[0]
 			if result.SerialNumber != "DEV001" {
 				t.Errorf("expected SerialNumber DEV001, got %s", result.SerialNumber)
 			}
@@ -2341,6 +2325,71 @@ func TestParseCommandResult(t *testing.T) {
 			}
 		})
 	}
+
+	// Empty / no-ID cases (expect 0 results).
+	emptyTests := []struct {
+		name string
+		body string
+	}{
+		{"empty body", ""},
+		{"only whitespace", "   \n\n  "},
+		{"missing ID field", "Return=0&CMD=INFO"},
+		{"non-numeric ID", "ID=abc&Return=0&CMD=INFO"},
+	}
+
+	for _, tc := range emptyTests {
+		t.Run(tc.name, func(t *testing.T) {
+			results := server.parseCommandResults(tc.body, "DEV001")
+			if len(results) != 0 {
+				t.Errorf("expected 0 results, got %d: %+v", len(results), results)
+			}
+		})
+	}
+
+	// Batched confirmation test cases (real device behavior).
+	t.Run("batched two results", func(t *testing.T) {
+		body := "ID=19&Return=0&CMD=DATA\nID=20&Return=0&CMD=DATA\n"
+		results := server.parseCommandResults(body, "DEV001")
+		if len(results) != 2 {
+			t.Fatalf("expected 2 results, got %d", len(results))
+		}
+		if results[0].ID != 19 || results[0].ReturnCode != 0 || results[0].Command != "DATA" {
+			t.Errorf("result[0] = %+v", results[0])
+		}
+		if results[1].ID != 20 || results[1].ReturnCode != 0 || results[1].Command != "DATA" {
+			t.Errorf("result[1] = %+v", results[1])
+		}
+	})
+
+	t.Run("batched three results mixed codes", func(t *testing.T) {
+		body := "ID=1&Return=0&CMD=INFO\nID=2&Return=-1002&CMD=USER ADD\nID=3&Return=0&CMD=CHECK\n"
+		results := server.parseCommandResults(body, "DEV001")
+		if len(results) != 3 {
+			t.Fatalf("expected 3 results, got %d", len(results))
+		}
+		if results[0].ID != 1 || results[0].ReturnCode != 0 || results[0].Command != "INFO" {
+			t.Errorf("result[0] = %+v", results[0])
+		}
+		if results[1].ID != 2 || results[1].ReturnCode != -1002 || results[1].Command != "USER ADD" {
+			t.Errorf("result[1] = %+v", results[1])
+		}
+		if results[2].ID != 3 || results[2].ReturnCode != 0 || results[2].Command != "CHECK" {
+			t.Errorf("result[2] = %+v", results[2])
+		}
+	})
+
+	t.Run("batched with extra data after CMD", func(t *testing.T) {
+		// Real device includes extra info after CMD on INFO confirmation.
+		body := "ID=1&Return=0&CMD=INFO\n~DeviceName=SpeedFace\nMAC=00:17:61:12:f8:db\n"
+		results := server.parseCommandResults(body, "DEV001")
+		// Only 1 result — the extra lines have no ID field.
+		if len(results) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(results))
+		}
+		if results[0].ID != 1 || results[0].Command != "INFO" {
+			t.Errorf("result[0] = %+v", results[0])
+		}
+	})
 }
 
 func TestCommandIDIncrement(t *testing.T) {
@@ -2505,6 +2554,53 @@ func TestHandleDeviceCmd_ConfirmationWithError(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timed out waiting for command result callback")
+	}
+}
+
+func TestHandleDeviceCmd_BatchedConfirmations(t *testing.T) {
+	received := make(chan CommandResult, 5)
+	server := NewADMSServer(
+		WithOnCommandResult(func(_ context.Context, result CommandResult) {
+			received <- result
+		}),
+	)
+	defer server.Close()
+
+	// Device batches 3 confirmations in a single POST (real device behavior).
+	body := "ID=1&Return=0&CMD=INFO\nID=2&Return=0&CMD=CHECK\nID=3&Return=-1002&CMD=DATA\n"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=BATCH001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Should receive all 3 results.
+	var results []CommandResult
+	for range 3 {
+		select {
+		case r := <-received:
+			results = append(results, r)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out; only received %d/3 results", len(results))
+		}
+	}
+
+	if results[0].ID != 1 || results[0].ReturnCode != 0 || results[0].Command != "INFO" {
+		t.Errorf("result[0] = %+v", results[0])
+	}
+	if results[1].ID != 2 || results[1].ReturnCode != 0 || results[1].Command != "CHECK" {
+		t.Errorf("result[1] = %+v", results[1])
+	}
+	if results[2].ID != 3 || results[2].ReturnCode != -1002 || results[2].Command != "DATA" {
+		t.Errorf("result[2] = %+v", results[2])
+	}
+	for _, r := range results {
+		if r.SerialNumber != "BATCH001" {
+			t.Errorf("expected SerialNumber BATCH001, got %s", r.SerialNumber)
+		}
 	}
 }
 

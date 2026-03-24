@@ -1016,31 +1016,53 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 		s.logger.Debug("devicecmd body", "device", serialNumber, "preview", bodyPreview(body))
 	}
 
-	result := s.parseCommandResult(string(body), serialNumber)
+	results := s.parseCommandResults(string(body), serialNumber)
 
-	s.logger.Info("command result",
-		"device", serialNumber,
-		"id", result.ID,
-		"return", result.ReturnCode,
-		"cmd", result.Command)
+	for _, result := range results {
+		s.logger.Info("command result",
+			"device", serialNumber,
+			"id", result.ID,
+			"return", result.ReturnCode,
+			"cmd", result.Command)
 
-	if !s.dispatchCommandResult(result) {
-		s.logger.Warn("callback queue full, command result dropped",
-			"device", serialNumber, "id", result.ID)
+		if !s.dispatchCommandResult(result) {
+			s.logger.Warn("callback queue full, command result dropped",
+				"device", serialNumber, "id", result.ID)
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, respOK)
 }
 
-// parseCommandResult parses a devicecmd confirmation body into a [CommandResult].
+// parseCommandResults parses a devicecmd confirmation body into one or more
+// [CommandResult] values. The device uses two different formats:
 //
-// The body format is typically "ID=<id>&Return=<code>&CMD=<cmd>" but devices
-// may also use newlines as separators. Unrecognized keys are ignored.
-func (s *ADMSServer) parseCommandResult(body, serialNumber string) CommandResult {
-	result := CommandResult{SerialNumber: serialNumber}
+// Batched format (ampersand-separated KV pairs, one result per line):
+//
+//	ID=1&Return=0&CMD=INFO\nID=2&Return=0&CMD=CHECK\n
+//
+// Shell/multiline format (newline-separated KV pairs, single result):
+//
+//	ID=32\nReturn=0\nCMD=Shell\nContent=output\n
+//
+// The parser accumulates key=value pairs into the current result. When a new
+// ID= is encountered, it flushes the previous result and starts a new one.
+// This handles both formats transparently.
+func (s *ADMSServer) parseCommandResults(body, serialNumber string) []CommandResult {
+	var results []CommandResult
+	current := CommandResult{SerialNumber: serialNumber}
+	hasID := false
 
-	// Devices may use "&" or newline as separator between key=value pairs.
+	flush := func() {
+		if hasID {
+			results = append(results, current)
+		}
+		current = CommandResult{SerialNumber: serialNumber}
+		hasID = false
+	}
+
+	// Normalize: treat both \n and & as delimiters between KV pairs.
 	body = strings.ReplaceAll(body, "\n", "&")
 	for part := range strings.SplitSeq(body, "&") {
 		part = strings.TrimSpace(part)
@@ -1053,22 +1075,29 @@ func (s *ADMSServer) parseCommandResult(body, serialNumber string) CommandResult
 		}
 		switch strings.ToUpper(strings.TrimSpace(key)) {
 		case "ID":
-			if id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
-				result.ID = id
-			} else {
+			id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil {
 				s.logger.Warn("devicecmd: unparseable ID", "device", serialNumber, "value", value)
+				continue
 			}
+			// New ID means new result — flush the previous one.
+			if hasID {
+				flush()
+			}
+			current.ID = id
+			hasID = true
 		case "RETURN":
 			if code, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-				result.ReturnCode = code
+				current.ReturnCode = code
 			} else {
 				s.logger.Warn("devicecmd: unparseable Return", "device", serialNumber, "value", value)
 			}
 		case "CMD":
-			result.Command = strings.TrimSpace(value)
+			current.Command = strings.TrimSpace(value)
 		}
 	}
-	return result
+	flush() // flush the last result
+	return results
 }
 
 // updateDeviceActivity updates the last activity timestamp for a device.
