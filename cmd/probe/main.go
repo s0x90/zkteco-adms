@@ -199,8 +199,8 @@ func main() {
 	defer server.Close()
 
 	if err := server.RegisterDevice(*sn); err != nil {
-		server.Close()
-		log.Fatalf("RegisterDevice: %v", err)
+		log.Printf("RegisterDevice: %v", err)
+		return
 	}
 
 	mux := http.NewServeMux()
@@ -327,7 +327,8 @@ func main() {
 	fmt.Println()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatal(err)
+		log.Print(err)
+		return
 	}
 
 	// Final summary.
