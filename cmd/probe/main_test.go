@@ -914,7 +914,7 @@ func TestRun_QueueFull(t *testing.T) {
 // device-wait loop (lines 265-267 in main.go). By setting onlineThreshold
 // to 1ns, the device appears offline immediately after RegisterDevice
 // (since more than 1ns elapses before IsDeviceOnline is called). The
-// goroutine enters the wait loop, and cancelling the context triggers the
+// goroutine enters the wait loop, and canceling the context triggers the
 // ctx.Done case.
 func TestRun_DeviceWaitCtxCancel(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
