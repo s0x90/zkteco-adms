@@ -297,7 +297,14 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) er
 				return
 			case <-timeout:
 				fmt.Println("\n=== TIMEOUT — printing summary ===")
-				printSummary(&mu, results, queued, replied)
+				mu.Lock()
+				sr := make([]result, len(results))
+				copy(sr, results)
+				sq := make([]candidate, len(queued))
+				copy(sq, queued)
+				srp := replied
+				mu.Unlock()
+				printSummary(&mu, sr, sq, srp)
 				cancelFn()
 				return
 			case <-ticker.C:
@@ -306,7 +313,14 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) er
 				mu.Unlock()
 				if remaining <= 0 {
 					fmt.Println("\n=== ALL CONFIRMATIONS RECEIVED ===")
-					printSummary(&mu, results, queued, replied)
+					mu.Lock()
+					sr := make([]result, len(results))
+					copy(sr, results)
+					sq := make([]candidate, len(queued))
+					copy(sq, queued)
+					srp := replied
+					mu.Unlock()
+					printSummary(&mu, sr, sq, srp)
 					cancelFn()
 					return
 				}
@@ -324,8 +338,15 @@ func run(ctx context.Context, addr, sn string, destructive bool, delayMs int) er
 		return err
 	}
 
-	// Final summary.
-	printSummary(&mu, results, queued, replied)
+	// Final summary — snapshot shared state under the lock to avoid races.
+	mu.Lock()
+	snapResults := make([]result, len(results))
+	copy(snapResults, results)
+	snapQueued := make([]candidate, len(queued))
+	copy(snapQueued, queued)
+	snapReplied := replied
+	mu.Unlock()
+	printSummary(&mu, snapResults, snapQueued, snapReplied)
 	return nil
 }
 
