@@ -384,9 +384,8 @@ func handleClearLog(server *zkadms.ADMSServer) http.Handler {
 	})
 }
 
-// handleAddUser queues a DATA UPDATE USERINFO command to add or update
-// a user on the device. Expects a JSON body with pin, name, privilege,
-// and card fields.
+// handleAddUser queues a USER ADD command to add or update a user on
+// the device. Expects a JSON body with pin, name, privilege, and card fields.
 func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sn, ok := requireDevice(w, r, server)
@@ -401,9 +400,7 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		data := fmt.Sprintf("PIN=%s\tName=%s\tPri=%d\tCard=%s",
-			req.PIN, req.Name, req.Privilege, req.Card)
-		if err := server.SendDataCommand(sn, "USERINFO", data); err != nil {
+		if err := server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card); err != nil {
 			if errors.Is(err, zkadms.ErrCommandQueueFull) {
 				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
 			} else {
@@ -411,11 +408,11 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 			}
 			return
 		}
-		writeCommandOK(w, sn, "DATA UPDATE USERINFO")
+		writeCommandOK(w, sn, "USER ADD")
 	})
 }
 
-// handleDeleteUser queues a DATA DEL_USER command to remove a user from
+// handleDeleteUser queues a USER DEL command to remove a user from
 // the device. Expects a JSON body with a pin field.
 func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -431,11 +428,15 @@ func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		cmd := fmt.Sprintf("DATA DEL_USER PIN=%s", req.PIN)
-		if !queueOrFail(w, server, sn, cmd) {
+		if err := server.SendUserDeleteCommand(sn, req.PIN); err != nil {
+			if errors.Is(err, zkadms.ErrCommandQueueFull) {
+				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
+			} else {
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
-		writeCommandOK(w, sn, cmd)
+		writeCommandOK(w, sn, "USER DEL")
 	})
 }
 
@@ -631,9 +632,9 @@ func run(ctx context.Context, addr string, devices []string) error {
 	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/users \`)
 	fmt.Println(`       -H 'Content-Type: application/json' \`)
 	fmt.Println(`       -d '{"pin":"1001","name":"John Doe","privilege":0,"card":"12345678"}'`)
-	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/command \`)
+	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/users/delete \`)
 	fmt.Println(`       -H 'Content-Type: application/json' \`)
-	fmt.Println(`       -d '{"command":"ENROLL_FP PIN=1001"}'`)
+	fmt.Println(`       -d '{"pin":"1001"}'`)
 	fmt.Println()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {

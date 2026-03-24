@@ -181,8 +181,11 @@ err := server.QueueCommand("DEVICE001", "CHECK")
 // Request device information
 err = server.SendInfoCommand("DEVICE001")
 
-// Send data query command
-err = server.SendDataCommand("DEVICE001", "USER", "user data")
+// Add or update a user on the device
+err = server.SendUserAddCommand("DEVICE001", "12345", "John Doe", 0, "")
+
+// Delete a user from the device
+err = server.SendUserDeleteCommand("DEVICE001", "12345")
 
 // Drain all pending commands for a device
 cmds := server.DrainCommands("DEVICE001")
@@ -423,7 +426,8 @@ Creates a new ADMS server instance configured with the given options.
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
 | `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
 | `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
-| `SendDataCommand(serialNumber, table, data string) error` | Queue a DATA QUERY command |
+| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a USER ADD command (ADMS protocol) |
+| `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a USER DEL command (ADMS protocol) |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |

@@ -105,7 +105,7 @@ func TestQueueAndGetCommands(t *testing.T) {
 	if err := server.QueueCommand(serialNumber, "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
-	if err := server.QueueCommand(serialNumber, "DATA QUERY USER"); err != nil {
+	if err := server.QueueCommand(serialNumber, "USER ADD PIN=1001\tName=Test\tPrivilege=0\tCard="); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
@@ -116,8 +116,8 @@ func TestQueueAndGetCommands(t *testing.T) {
 	if commands[0] != "INFO" {
 		t.Errorf("Expected first command to be INFO, got %s", commands[0])
 	}
-	if commands[1] != "DATA QUERY USER" {
-		t.Errorf("Expected second command to be 'DATA QUERY USER', got %s", commands[1])
+	if commands[1] != "USER ADD PIN=1001\tName=Test\tPrivilege=0\tCard=" {
+		t.Errorf("Expected second command to be USER ADD, got %s", commands[1])
 	}
 
 	// Queue should be cleared after retrieval
@@ -267,7 +267,7 @@ func TestHandleGetRequest(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	if err := server.QueueCommand(serialNumber, "DATA QUERY USER"); err != nil {
+	if err := server.QueueCommand(serialNumber, "USER DEL PIN=1001"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
 
@@ -279,7 +279,7 @@ func TestHandleGetRequest(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "C:DATA QUERY USER") {
+	if !strings.Contains(w.Body.String(), "C:USER DEL PIN=1001") {
 		t.Errorf("Expected command in response, got: %s", w.Body.String())
 	}
 }
@@ -736,24 +736,41 @@ func TestQueueCommand(t *testing.T) {
 	}
 }
 
-func TestSendDataCommand(t *testing.T) {
+func TestSendUserAddCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
 
-	if err := server.SendDataCommand(serialNumber, "USER", "user data"); err != nil {
-		t.Fatalf("SendDataCommand failed: %v", err)
+	if err := server.SendUserAddCommand(serialNumber, "1001", "John Doe", 0, "12345678"); err != nil {
+		t.Fatalf("SendUserAddCommand failed: %v", err)
 	}
 
 	commands := server.DrainCommands(serialNumber)
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
-	if !strings.Contains(commands[0], "DATA QUERY USER") {
-		t.Errorf("Expected DATA QUERY USER in command, got %s", commands[0])
+	want := "USER ADD PIN=1001\tName=John Doe\tPrivilege=0\tCard=12345678"
+	if commands[0] != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0])
 	}
-	if !strings.Contains(commands[0], "user data") {
-		t.Errorf("Expected user data in command, got %s", commands[0])
+}
+
+func TestSendUserDeleteCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+	serialNumber := "TEST001"
+
+	if err := server.SendUserDeleteCommand(serialNumber, "1001"); err != nil {
+		t.Fatalf("SendUserDeleteCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands(serialNumber)
+	if len(commands) != 1 {
+		t.Errorf("Expected 1 command, got %d", len(commands))
+	}
+	want := "USER DEL PIN=1001"
+	if commands[0] != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0])
 	}
 }
 
@@ -1960,18 +1977,35 @@ func TestHandler_RejectsWhenDeviceLimitReached(t *testing.T) {
 	}
 }
 
-func TestSendDataCommand_ReturnsError(t *testing.T) {
+func TestSendUserAddCommand_ReturnsError(t *testing.T) {
 	server := NewADMSServer(WithMaxCommandsPerDevice(1))
 	defer server.Close()
 	sn := "TEST001"
 
 	// First command should succeed.
-	if err := server.SendDataCommand(sn, "USER", "data"); err != nil {
-		t.Fatalf("SendDataCommand failed: %v", err)
+	if err := server.SendUserAddCommand(sn, "1001", "John", 0, ""); err != nil {
+		t.Fatalf("SendUserAddCommand failed: %v", err)
 	}
 
 	// Second should fail due to queue limit.
-	err := server.SendDataCommand(sn, "USER", "more data")
+	err := server.SendUserAddCommand(sn, "1002", "Jane", 0, "")
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendUserDeleteCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	// First command should succeed.
+	if err := server.SendUserDeleteCommand(sn, "1001"); err != nil {
+		t.Fatalf("SendUserDeleteCommand failed: %v", err)
+	}
+
+	// Second should fail due to queue limit.
+	err := server.SendUserDeleteCommand(sn, "1002")
 	if !errors.Is(err, ErrCommandQueueFull) {
 		t.Errorf("expected ErrCommandQueueFull, got %v", err)
 	}

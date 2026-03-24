@@ -1116,17 +1116,34 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SendDataCommand formats and queues a DATA QUERY command.
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) error {
-	cmd := fmt.Sprintf("DATA QUERY %s\n%s", table, data)
-	return s.QueueCommand(serialNumber, cmd)
-}
-
 // SendInfoCommand queues an INFO command to request device information.
 // It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
 	return s.QueueCommand(serialNumber, "INFO")
+}
+
+// SendUserAddCommand queues a USER ADD command to add or update a user on
+// the device. This follows the ADMS protocol format where the server sends
+// tab-separated user data:
+//
+//	USER ADD PIN=<pin>\tName=<name>\tPrivilege=<privilege>\tCard=<card>
+//
+// Privilege values: 0 = normal user, 14 = admin.
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error {
+	cmd := fmt.Sprintf("USER ADD PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendUserDeleteCommand queues a USER DEL command to remove a user from the
+// device. This follows the ADMS protocol format:
+//
+//	USER DEL PIN=<pin>
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
+	cmd := fmt.Sprintf("USER DEL PIN=%s", pin)
+	return s.QueueCommand(serialNumber, cmd)
 }
 
 // ParseQueryParams parses URL query parameters commonly used in iclock protocol.

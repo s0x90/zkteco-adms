@@ -552,8 +552,8 @@ func TestAddUser_Success(t *testing.T) {
 
 	var resp commandResponse
 	decodeResponse(t, w, &resp)
-	if resp.Command != "DATA UPDATE USERINFO" {
-		t.Errorf("expected command DATA UPDATE USERINFO, got %q", resp.Command)
+	if resp.Command != "USER ADD" {
+		t.Errorf("expected command USER ADD, got %q", resp.Command)
 	}
 }
 
@@ -619,8 +619,8 @@ func TestDeleteUser_Success(t *testing.T) {
 
 	var resp commandResponse
 	decodeResponse(t, w, &resp)
-	if !strings.Contains(resp.Command, "DATA DEL_USER PIN=1001") {
-		t.Errorf("expected DEL_USER command with PIN; got: %q", resp.Command)
+	if resp.Command != "USER DEL" {
+		t.Errorf("expected USER DEL command; got: %q", resp.Command)
 	}
 }
 
