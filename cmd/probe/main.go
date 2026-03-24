@@ -199,6 +199,7 @@ func main() {
 	defer server.Close()
 
 	if err := server.RegisterDevice(*sn); err != nil {
+		server.Close()
 		log.Fatalf("RegisterDevice: %v", err)
 	}
 
@@ -230,7 +231,9 @@ func main() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP server shutdown error: %v", err)
+		}
 	}()
 
 	// Queue commands in a goroutine with delays.
