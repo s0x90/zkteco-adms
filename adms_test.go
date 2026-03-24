@@ -257,8 +257,8 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "C:INFO") {
-		t.Errorf("Expected command in response, got: %s", w.Body.String())
+	if want := "C:1:INFO\n"; w.Body.String() != want {
+		t.Errorf("Expected response %q, got: %q", want, w.Body.String())
 	}
 }
 
@@ -279,8 +279,8 @@ func TestHandleGetRequest(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "C:USER DEL PIN=1001") {
-		t.Errorf("Expected command in response, got: %s", w.Body.String())
+	if want := "C:1:USER DEL PIN=1001\n"; w.Body.String() != want {
+		t.Errorf("Expected response %q, got: %q", want, w.Body.String())
 	}
 }
 
@@ -2216,5 +2216,381 @@ func TestDefaultMaxDevices(t *testing.T) {
 
 	if server.maxDevices != 1000 {
 		t.Errorf("expected default maxDevices=1000, got %d", server.maxDevices)
+	}
+}
+
+// --- Phase 3 (continued): Command ID tracking and confirmation tests ---
+
+func TestParseCommandResult(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantID     int64
+		wantReturn int
+		wantCmd    string
+	}{
+		{
+			name:       "standard ampersand format",
+			body:       "ID=42&Return=0&CMD=USER ADD",
+			wantID:     42,
+			wantReturn: 0,
+			wantCmd:    "USER ADD",
+		},
+		{
+			name:       "newline separated",
+			body:       "ID=7\nReturn=1\nCMD=REBOOT",
+			wantID:     7,
+			wantReturn: 1,
+			wantCmd:    "REBOOT",
+		},
+		{
+			name:       "mixed separators",
+			body:       "ID=3&Return=0\nCMD=INFO",
+			wantID:     3,
+			wantReturn: 0,
+			wantCmd:    "INFO",
+		},
+		{
+			name:       "extra whitespace",
+			body:       " ID = 10 & Return = 0 & CMD = USER DEL ",
+			wantID:     10,
+			wantReturn: 0,
+			wantCmd:    "USER DEL",
+		},
+		{
+			name:       "empty body",
+			body:       "",
+			wantID:     0,
+			wantReturn: 0,
+			wantCmd:    "",
+		},
+		{
+			name:       "missing ID field",
+			body:       "Return=0&CMD=INFO",
+			wantID:     0,
+			wantReturn: 0,
+			wantCmd:    "INFO",
+		},
+		{
+			name:       "missing Return field",
+			body:       "ID=5&CMD=REBOOT",
+			wantID:     5,
+			wantReturn: 0,
+			wantCmd:    "REBOOT",
+		},
+		{
+			name:       "missing CMD field",
+			body:       "ID=5&Return=2",
+			wantID:     5,
+			wantReturn: 2,
+			wantCmd:    "",
+		},
+		{
+			name:       "non-numeric ID ignored",
+			body:       "ID=abc&Return=0&CMD=INFO",
+			wantID:     0,
+			wantReturn: 0,
+			wantCmd:    "INFO",
+		},
+		{
+			name:       "non-numeric Return ignored",
+			body:       "ID=1&Return=xyz&CMD=INFO",
+			wantID:     1,
+			wantReturn: 0,
+			wantCmd:    "INFO",
+		},
+		{
+			name:       "case insensitive keys",
+			body:       "id=99&return=0&cmd=CHECK",
+			wantID:     99,
+			wantReturn: 0,
+			wantCmd:    "CHECK",
+		},
+		{
+			name:       "unknown keys ignored",
+			body:       "ID=1&Return=0&CMD=INFO&Extra=ignored",
+			wantID:     1,
+			wantReturn: 0,
+			wantCmd:    "INFO",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := server.parseCommandResult(tc.body, "DEV001")
+			if result.SerialNumber != "DEV001" {
+				t.Errorf("expected SerialNumber DEV001, got %s", result.SerialNumber)
+			}
+			if result.ID != tc.wantID {
+				t.Errorf("expected ID %d, got %d", tc.wantID, result.ID)
+			}
+			if result.ReturnCode != tc.wantReturn {
+				t.Errorf("expected ReturnCode %d, got %d", tc.wantReturn, result.ReturnCode)
+			}
+			if result.Command != tc.wantCmd {
+				t.Errorf("expected Command %q, got %q", tc.wantCmd, result.Command)
+			}
+		})
+	}
+}
+
+func TestCommandIDIncrement(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+	serialNumber := "IDTEST001"
+
+	// Queue 3 commands.
+	for _, cmd := range []string{"INFO", "REBOOT", "CHECK"} {
+		if err := server.QueueCommand(serialNumber, cmd); err != nil {
+			t.Fatalf("QueueCommand(%q) failed: %v", cmd, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN="+serialNumber, nil)
+	w := httptest.NewRecorder()
+	server.HandleGetRequest(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Response should contain 3 commands with incrementing IDs.
+	body := w.Body.String()
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 command lines, got %d: %q", len(lines), body)
+	}
+
+	wantLines := []string{
+		"C:1:INFO",
+		"C:2:REBOOT",
+		"C:3:CHECK",
+	}
+	for i, want := range wantLines {
+		if lines[i] != want {
+			t.Errorf("line %d: expected %q, got %q", i, want, lines[i])
+		}
+	}
+}
+
+func TestCommandIDIncrement_AcrossRequests(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	// First request: 1 command → ID=1
+	if err := server.QueueCommand("DEV1", "INFO"); err != nil {
+		t.Fatal(err)
+	}
+	req1 := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=DEV1", nil)
+	w1 := httptest.NewRecorder()
+	server.HandleGetRequest(w1, req1)
+
+	if want := "C:1:INFO\n"; w1.Body.String() != want {
+		t.Errorf("first request: expected %q, got %q", want, w1.Body.String())
+	}
+
+	// Second request: 1 command → ID=2 (counter continues)
+	if err := server.QueueCommand("DEV1", "REBOOT"); err != nil {
+		t.Fatal(err)
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=DEV1", nil)
+	w2 := httptest.NewRecorder()
+	server.HandleGetRequest(w2, req2)
+
+	if want := "C:2:REBOOT\n"; w2.Body.String() != want {
+		t.Errorf("second request: expected %q, got %q", want, w2.Body.String())
+	}
+}
+
+func TestCommandIDIncrement_AcrossDevices(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	// Commands for different devices share the same ID counter.
+	if err := server.QueueCommand("DEVA", "INFO"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.QueueCommand("DEVB", "REBOOT"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain DEVA → ID=1
+	reqA := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=DEVA", nil)
+	wA := httptest.NewRecorder()
+	server.HandleGetRequest(wA, reqA)
+
+	if want := "C:1:INFO\n"; wA.Body.String() != want {
+		t.Errorf("DEVA: expected %q, got %q", want, wA.Body.String())
+	}
+
+	// Drain DEVB → ID=2
+	reqB := httptest.NewRequest(http.MethodGet, "/iclock/getrequest?SN=DEVB", nil)
+	wB := httptest.NewRecorder()
+	server.HandleGetRequest(wB, reqB)
+
+	if want := "C:2:REBOOT\n"; wB.Body.String() != want {
+		t.Errorf("DEVB: expected %q, got %q", want, wB.Body.String())
+	}
+}
+
+func TestHandleDeviceCmd_Confirmation(t *testing.T) {
+	received := make(chan CommandResult, 1)
+	server := NewADMSServer(
+		WithOnCommandResult(func(_ context.Context, result CommandResult) {
+			received <- result
+		}),
+	)
+	defer server.Close()
+
+	body := "ID=42&Return=0&CMD=USER ADD"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=CONF001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "OK" {
+		t.Errorf("expected OK response, got %q", w.Body.String())
+	}
+
+	select {
+	case result := <-received:
+		if result.SerialNumber != "CONF001" {
+			t.Errorf("expected SerialNumber CONF001, got %s", result.SerialNumber)
+		}
+		if result.ID != 42 {
+			t.Errorf("expected ID 42, got %d", result.ID)
+		}
+		if result.ReturnCode != 0 {
+			t.Errorf("expected ReturnCode 0, got %d", result.ReturnCode)
+		}
+		if result.Command != "USER ADD" {
+			t.Errorf("expected Command USER ADD, got %s", result.Command)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for command result callback")
+	}
+}
+
+func TestHandleDeviceCmd_ConfirmationWithError(t *testing.T) {
+	received := make(chan CommandResult, 1)
+	server := NewADMSServer(
+		WithOnCommandResult(func(_ context.Context, result CommandResult) {
+			received <- result
+		}),
+	)
+	defer server.Close()
+
+	body := "ID=5&Return=1&CMD=REBOOT"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=ERR001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	server.HandleDeviceCmd(w, req)
+
+	select {
+	case result := <-received:
+		if result.ReturnCode != 1 {
+			t.Errorf("expected ReturnCode 1 (error), got %d", result.ReturnCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for command result callback")
+	}
+}
+
+func TestHandleDeviceCmd_NoCallbackConfigured(t *testing.T) {
+	// No WithOnCommandResult — should still respond OK without panicking.
+	server := NewADMSServer()
+	defer server.Close()
+
+	body := "ID=1&Return=0&CMD=INFO"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=NOCB001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+
+	server.HandleDeviceCmd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "OK" {
+		t.Errorf("expected OK response, got %q", w.Body.String())
+	}
+}
+
+func TestWithOnCommandResult_ReceivesContext(t *testing.T) {
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithBaseContext(t.Context()),
+		WithOnCommandResult(func(ctx context.Context, result CommandResult) {
+			received <- ctx
+		}),
+	)
+	defer server.Close()
+
+	body := "ID=1&Return=0&CMD=INFO"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=CTX001", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	select {
+	case cbCtx := <-received:
+		if err := cbCtx.Err(); err != nil {
+			t.Errorf("expected non-canceled context, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for WithOnCommandResult callback")
+	}
+}
+
+func TestWithOnCommandResult_ContextCancelledAfterClose(t *testing.T) {
+	received := make(chan context.Context, 1)
+	server := NewADMSServer(
+		WithOnCommandResult(func(ctx context.Context, result CommandResult) {
+			received <- ctx
+		}),
+	)
+
+	body := "ID=1&Return=0&CMD=INFO"
+	req := httptest.NewRequest(http.MethodPost, "/iclock/devicecmd?SN=CTXCLOSE", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	server.HandleDeviceCmd(w, req)
+
+	var cbCtx context.Context
+	select {
+	case cbCtx = <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for callback")
+	}
+
+	server.Close()
+
+	if err := cbCtx.Err(); err == nil {
+		t.Error("expected context to be canceled after Close, but it was not")
+	}
+}
+
+func TestCommandResultType(t *testing.T) {
+	// Verify CommandResult fields can be populated and read.
+	r := CommandResult{
+		SerialNumber: "DEV001",
+		ID:           42,
+		ReturnCode:   0,
+		Command:      "USER ADD",
+	}
+	if r.SerialNumber != "DEV001" {
+		t.Errorf("unexpected SerialNumber: %s", r.SerialNumber)
+	}
+	if r.ID != 42 {
+		t.Errorf("unexpected ID: %d", r.ID)
+	}
+	if r.ReturnCode != 0 {
+		t.Errorf("unexpected ReturnCode: %d", r.ReturnCode)
+	}
+	if r.Command != "USER ADD" {
+		t.Errorf("unexpected Command: %s", r.Command)
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -110,7 +111,9 @@ const (
 	respDeviceLimitMsg   = "Device limit reached"
 
 	// cmdFormat is the format string for writing pending commands.
-	cmdFormat = "C:%s\n"
+	// The device expects "C:<ID>:<CMD>\n" where ID is a monotonically
+	// increasing integer used to correlate command confirmations.
+	cmdFormat = "C:%d:%s\n"
 )
 
 // Verify mode constants for the ADMS protocol.
@@ -263,6 +266,15 @@ func WithOnRegistry(fn func(ctx context.Context, sn string, info map[string]stri
 	}
 }
 
+// WithOnCommandResult registers a callback invoked when a device reports the
+// result of a previously sent command via the /iclock/devicecmd endpoint.
+// The [CommandResult.ReturnCode] is 0 on success.
+func WithOnCommandResult(fn func(ctx context.Context, result CommandResult)) Option {
+	return func(s *ADMSServer) {
+		s.onCommandResult = fn
+	}
+}
+
 // WithBaseContext sets the parent context for the server. Callback contexts
 // are derived from this context. If not provided, [context.Background] is used.
 func WithBaseContext(ctx context.Context) Option {
@@ -376,25 +388,46 @@ type DeviceSnapshot struct {
 	Options      map[string]string `json:"options"`
 }
 
+// CommandResult represents the result of a command execution reported by a
+// device via the /iclock/devicecmd endpoint.
+//
+// After the server sends "C:<ID>:<CMD>\n" via /iclock/getrequest, the device
+// executes the command and POSTs back a confirmation containing the command ID
+// and a return code. A ReturnCode of 0 indicates success.
+type CommandResult struct {
+	// SerialNumber is the device that executed the command.
+	SerialNumber string
+	// ID is the command identifier assigned by the server.
+	ID int64
+	// ReturnCode is the device's result code (0 = success).
+	ReturnCode int
+	// Command is the command type echoed back by the device (e.g. "USER ADD"),
+	// if present in the confirmation body.
+	Command string
+}
+
 // ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
 //
 // Callbacks are dispatched asynchronously via an internal worker goroutine and
 // are designed not to block device HTTP responses during normal operation.
 // Under backpressure, dispatch may wait up to dispatchTimeout when the
-// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo], and
-// [WithOnRegistry] to register callbacks. Call Close to drain the callback
-// queue when the server is shutting down.
+// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo],
+// [WithOnRegistry], and [WithOnCommandResult] to register callbacks.
+// Call Close to drain the callback queue when the server is shutting down.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
 	commandQueue map[string][]string // Serial number -> commands queue
 	queueMutex   sync.RWMutex
 
-	onAttendance func(ctx context.Context, record AttendanceRecord)
-	onDeviceInfo func(ctx context.Context, sn string, info map[string]string)
-	onRegistry   func(ctx context.Context, sn string, info map[string]string)
+	onAttendance    func(ctx context.Context, record AttendanceRecord)
+	onDeviceInfo    func(ctx context.Context, sn string, info map[string]string)
+	onRegistry      func(ctx context.Context, sn string, info map[string]string)
+	onCommandResult func(ctx context.Context, result CommandResult)
 
 	logger *slog.Logger
+
+	cmdID atomic.Int64 // monotonically increasing command ID counter
 
 	maxBodySize        int64         // maximum allowed request body size in bytes
 	callbackBufferSize int           // capacity of callbackCh (used at construction)
@@ -599,13 +632,16 @@ func (s *ADMSServer) requireDevice(w http.ResponseWriter, r *http.Request) (stri
 }
 
 // writeCommandsOrOK drains pending commands for a device and writes them as
-// "C:<cmd>\n" lines. If no commands are pending, it writes "OK".
+// "C:<id>:<cmd>\n" lines with monotonically increasing IDs. The device uses
+// the ID to confirm execution via /iclock/devicecmd.
+// If no commands are pending, it writes "OK".
 func (s *ADMSServer) writeCommandsOrOK(w http.ResponseWriter, serialNumber string) {
 	commands := s.DrainCommands(serialNumber)
 	w.WriteHeader(http.StatusOK)
 	if len(commands) > 0 {
 		for _, cmd := range commands {
-			fmt.Fprintf(w, cmdFormat, cmd)
+			id := s.cmdID.Add(1)
+			fmt.Fprintf(w, cmdFormat, id, cmd)
 		}
 	} else {
 		fmt.Fprint(w, respOK)
@@ -712,6 +748,18 @@ func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool 
 // dispatchRegistry dispatches registry info to the configured callback.
 func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
 	return s.dispatchMapCallback(sn, info, s.onRegistry)
+}
+
+// dispatchCommandResult dispatches a command result to the configured callback.
+func (s *ADMSServer) dispatchCommandResult(result CommandResult) bool {
+	cb := s.onCommandResult
+	if cb == nil {
+		return true
+	}
+	ctx := s.baseCtx
+	return s.dispatchCallback(func() {
+		cb(ctx, result)
+	})
 }
 
 // bodyPreview returns a truncated preview of body for logging (max maxBodyPreviewLen bytes).
@@ -938,6 +986,15 @@ func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDeviceCmd handles the /iclock/devicecmd endpoint.
+//
+// After the server sends "C:<ID>:<CMD>\n" via /iclock/getrequest, the device
+// executes the command and POSTs the result here. The body typically contains
+// key=value pairs separated by "&", for example:
+//
+//	ID=1&Return=0&CMD=USER ADD
+//
+// A Return value of 0 indicates success. The parsed result is dispatched to
+// the callback registered via [WithOnCommandResult].
 func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -950,17 +1007,68 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 
 	s.logRequest("devicecmd", r, serialNumber)
 
-	// Device is reporting command execution result
 	body, err := s.readBody(w, r)
 	if err != nil {
 		return
 	}
+
 	if len(body) > 0 {
-		s.logger.Debug("devicecmd body", "preview", bodyPreview(body))
+		s.logger.Debug("devicecmd body", "device", serialNumber, "preview", bodyPreview(body))
+	}
+
+	result := s.parseCommandResult(string(body), serialNumber)
+
+	s.logger.Info("command result",
+		"device", serialNumber,
+		"id", result.ID,
+		"return", result.ReturnCode,
+		"cmd", result.Command)
+
+	if !s.dispatchCommandResult(result) {
+		s.logger.Warn("callback queue full, command result dropped",
+			"device", serialNumber, "id", result.ID)
 	}
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "OK: Command received: %s", string(body))
+	fmt.Fprint(w, respOK)
+}
+
+// parseCommandResult parses a devicecmd confirmation body into a [CommandResult].
+//
+// The body format is typically "ID=<id>&Return=<code>&CMD=<cmd>" but devices
+// may also use newlines as separators. Unrecognized keys are ignored.
+func (s *ADMSServer) parseCommandResult(body, serialNumber string) CommandResult {
+	result := CommandResult{SerialNumber: serialNumber}
+
+	// Devices may use "&" or newline as separator between key=value pairs.
+	body = strings.ReplaceAll(body, "\n", "&")
+	for part := range strings.SplitSeq(body, "&") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(key)) {
+		case "ID":
+			if id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+				result.ID = id
+			} else {
+				s.logger.Warn("devicecmd: unparseable ID", "device", serialNumber, "value", value)
+			}
+		case "RETURN":
+			if code, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				result.ReturnCode = code
+			} else {
+				s.logger.Warn("devicecmd: unparseable Return", "device", serialNumber, "value", value)
+			}
+		case "CMD":
+			result.Command = strings.TrimSpace(value)
+		}
+	}
+	return result
 }
 
 // updateDeviceActivity updates the last activity timestamp for a device.

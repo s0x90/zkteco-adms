@@ -138,6 +138,7 @@ defer server.Close()
 | `WithOnAttendance` | nil | Attendance record callback |
 | `WithOnDeviceInfo` | nil | Device info callback |
 | `WithOnRegistry` | nil | Device registry callback |
+| `WithOnCommandResult` | nil | Command confirmation callback (see [CommandResult](#commandresult)) |
 
 ### Handling Attendance Records
 
@@ -169,6 +170,18 @@ zkadms.WithOnDeviceInfo(func(ctx context.Context, sn string, info map[string]str
 zkadms.WithOnRegistry(func(ctx context.Context, sn string, info map[string]string) {
     // Called when a device registers or re-registers.
     // info contains parsed key=value pairs from the registry body.
+})
+```
+
+### Handling Command Results
+
+```go
+zkadms.WithOnCommandResult(func(ctx context.Context, result zkadms.CommandResult) {
+    // Called when a device reports the result of a command.
+    // result.SerialNumber - Device that executed the command
+    // result.ID           - Command ID assigned by the server
+    // result.ReturnCode   - 0 = success, non-zero = error
+    // result.Command      - Command type echoed back (e.g. "USER ADD")
 })
 ```
 
@@ -256,6 +269,30 @@ server.Close()
 | `/iclock/getrequest` | GET | Device polls for pending commands |
 | `/iclock/devicecmd` | POST | Device reports command execution results |
 | `/iclock/inspect` | GET | Returns JSON summary of devices and their current status (opt-in via `WithEnableInspect`) |
+
+### Command Wire Format
+
+When a device polls `/iclock/getrequest`, pending commands are sent as:
+
+```
+C:<ID>:<CMD>\n
+```
+
+Where `<ID>` is a monotonically increasing integer assigned by the server. For example:
+
+```
+C:1:INFO
+C:2:USER ADD PIN=1001	Name=John Doe	Privilege=0	Card=12345678
+C:3:USER DEL PIN=1001
+```
+
+After executing a command, the device POSTs the result to `/iclock/devicecmd` with a body like:
+
+```
+ID=1&Return=0&CMD=INFO
+```
+
+A `Return` value of `0` indicates success. The parsed result is delivered to the callback registered via `WithOnCommandResult`.
 
 ### Registry Payload Parsing
 
@@ -438,6 +475,9 @@ Represents a single attendance transaction with `UserID`, `Timestamp`, `Status`,
 #### `DeviceSnapshot`
 JSON representation of a device in the `/iclock/inspect` response.
 
+#### `CommandResult`
+Represents the result of a command execution reported by a device. Fields: `SerialNumber`, `ID` (int64), `ReturnCode` (int, 0 = success), and `Command` (string).
+
 ### Constructor
 
 #### `NewADMSServer(opts ...Option) *ADMSServer`
@@ -462,6 +502,7 @@ Creates a new ADMS server instance configured with the given options.
 | `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
 | `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
 | `WithOnRegistry(func(context.Context, string, map[string]string))` | Set registry callback |
+| `WithOnCommandResult(func(context.Context, CommandResult))` | Set command confirmation callback |
 
 ### Methods
 

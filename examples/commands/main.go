@@ -578,6 +578,16 @@ func run(ctx context.Context, addr string, devices []string) error {
 				zkadms.VerifyModeName(record.VerifyMode),
 				record.SerialNumber)
 		}),
+
+		// Log command confirmations from devices.
+		zkadms.WithOnCommandResult(func(_ context.Context, result zkadms.CommandResult) {
+			status := "OK"
+			if result.ReturnCode != 0 {
+				status = fmt.Sprintf("FAIL (code %d)", result.ReturnCode)
+			}
+			fmt.Printf("Command result: device=%s id=%d cmd=%q status=%s\n",
+				result.SerialNumber, result.ID, result.Command, status)
+		}),
 	)
 	defer server.Close()
 
