@@ -1015,6 +1015,8 @@ func (w *errWriter) Write([]byte) (int, error) {
 }
 
 func TestAttendanceHandler_EncodeError(t *testing.T) {
+	t.Helper()
+
 	store := NewAttendanceStore()
 	handler := attendanceHandler(store)
 
@@ -1022,10 +1024,12 @@ func TestAttendanceHandler_EncodeError(t *testing.T) {
 	w := &errWriter{header: make(http.Header)}
 	handler.ServeHTTP(w, req)
 
-	// The handler should not panic; the encode error is logged.
+	t.Log("handler did not panic on encode error")
 }
 
 func TestSummaryHandler_EncodeError(t *testing.T) {
+	t.Helper()
+
 	store := NewAttendanceStore()
 	handler := summaryHandler(store)
 
@@ -1033,5 +1037,5 @@ func TestSummaryHandler_EncodeError(t *testing.T) {
 	w := &errWriter{header: make(http.Header)}
 	handler.ServeHTTP(w, req)
 
-	// The handler should not panic; the encode error is logged.
+	t.Log("handler did not panic on encode error")
 }
