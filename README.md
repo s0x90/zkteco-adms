@@ -194,11 +194,26 @@ err := server.QueueCommand("DEVICE001", "CHECK")
 // Request device information
 err = server.SendInfoCommand("DEVICE001")
 
+// Heartbeat / connectivity check
+err = server.SendCheckCommand("DEVICE001")
+
 // Add or update a user on the device
 err = server.SendUserAddCommand("DEVICE001", "12345", "John Doe", 0, "")
 
 // Delete a user from the device
 err = server.SendUserDeleteCommand("DEVICE001", "12345")
+
+// Retrieve a device option (value arrives via device info push)
+err = server.SendGetOptionCommand("DEVICE001", "DeviceName")
+
+// Query all users (data pushed via POST /iclock/cdata)
+err = server.SendQueryUsersCommand("DEVICE001")
+
+// Execute a shell command on the device (use with caution!)
+err = server.SendShellCommand("DEVICE001", "date")
+
+// Request log data
+err = server.SendLogCommand("DEVICE001")
 
 // Drain all pending commands for a device
 cmds := server.DrainCommands("DEVICE001")
@@ -294,6 +309,51 @@ ID=1&Return=0&CMD=INFO
 
 A `Return` value of `0` indicates success. The parsed result is delivered to the callback registered via `WithOnCommandResult`.
 
+Devices may batch multiple confirmations in a single POST:
+
+```
+ID=1&Return=0&CMD=DATA
+ID=2&Return=0&CMD=DATA
+```
+
+The parser handles both batched and multiline formats (e.g. Shell command responses with `Content=` fields).
+
+### Command Return Codes
+
+These error codes have been confirmed on real ZAM180-NF firmware:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `-1` | Command not supported or no data available |
+| `-2` | File operation failed |
+| `-1002` | Invalid command syntax |
+| `-1004` | Table/feature not supported on this device model |
+
+### Confirmed Commands
+
+The following commands have been verified on real hardware (SpeedFace-V5L-RFID, ZAM180-NF-Ver1.1.17 firmware):
+
+| Command | Convenience Method | Confirmed CMD echo | Notes |
+|---------|-------------------|-------------------|-------|
+| `INFO` | `SendInfoCommand` | `INFO` | Returns full device info |
+| `CHECK` | `SendCheckCommand` | `CHECK` | Heartbeat/ping |
+| `GET OPTION FROM <key>` | `SendGetOptionCommand` | `GET OPTION` | See key list below |
+| `DATA UPDATE USERINFO PIN=...` | `SendUserAddCommand` | `DATA` | Tab-separated fields |
+| `DATA DELETE USERINFO PIN=...` | `SendUserDeleteCommand` | `DATA` | |
+| `DATA QUERY USERINFO` | `SendQueryUsersCommand` | `DATA` | Data pushed via /iclock/cdata |
+| `DATA QUERY USERINFO PIN=<n>` | `QueueCommand` | `DATA` | Query single user |
+| `Shell <cmd>` | `SendShellCommand` | `Shell` | Executes OS commands |
+| `LOG` | `SendLogCommand` | `LOG` | Request log data |
+
+Confirmed GET OPTION keys: `DeviceName`, `FWVersion`, `IPAddress`, `MACAddress`, `Platform`, `WorkCode`, `LockCount`, `UserCount`, `FPCount`, `AttLogCount`, `FaceCount`, `TransactionCount`, `MaxUserCount`, `MaxAttLogCount`, `MaxFingerCount`, `MaxFaceCount`.
+
+**Important protocol notes:**
+- The ADMS datasheet documents user commands as `USER ADD` / `USER DEL`, but real devices reject these with error -1002. Use `DATA UPDATE USERINFO` / `DATA DELETE USERINFO` instead.
+- `DATA DEL USERINFO` (truncated) also fails — the full word `DELETE` is required.
+- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint.
+- `Shell` commands execute on the device's Linux OS — use with extreme caution.
+
 ### Registry Payload Parsing
 
 Some ZKTeco devices POST a registry body containing comma-separated `key=value` pairs, e.g.:
@@ -375,6 +435,16 @@ See the [examples](./examples) directory for complete examples:
 - **[basic](./examples/basic)** - Simple server with status endpoint
 - **[commands](./examples/commands)** - Device command management via REST API
 - **[database](./examples/database)** - Integration with database storage
+
+### Device Probe Tool
+
+The `cmd/probe` tool queues candidate commands to a real device and reports which ones succeed vs fail. Useful for discovering what your specific device model supports:
+
+```bash
+go run ./cmd/probe -addr :8080 -sn YOUR_SERIAL_NUMBER
+```
+
+Use `-destructive` to include potentially dangerous commands (CONTROL DEVICE, SET OPTION, etc.).
 
 ### Running Examples
 
@@ -516,8 +586,13 @@ Creates a new ADMS server instance configured with the given options.
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
 | `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
 | `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
+| `SendCheckCommand(serialNumber string) error` | Queue a CHECK (heartbeat) command |
 | `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a DATA UPDATE USERINFO command |
 | `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a DATA DELETE USERINFO command |
+| `SendGetOptionCommand(serialNumber, key string) error` | Queue a GET OPTION FROM command |
+| `SendQueryUsersCommand(serialNumber string) error` | Queue a DATA QUERY USERINFO command |
+| `SendShellCommand(serialNumber, command string) error` | Queue a Shell command (use with caution) |
+| `SendLogCommand(serialNumber string) error` | Queue a LOG command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |

@@ -798,6 +798,94 @@ func TestSendInfoCommand(t *testing.T) {
 	}
 }
 
+func TestSendCheckCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.SendCheckCommand("TEST001"); err != nil {
+		t.Fatalf("SendCheckCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands("TEST001")
+	if len(commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(commands))
+	}
+	if commands[0] != "CHECK" {
+		t.Errorf("Expected CHECK command, got %s", commands[0])
+	}
+}
+
+func TestSendGetOptionCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.SendGetOptionCommand("TEST001", "DeviceName"); err != nil {
+		t.Fatalf("SendGetOptionCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands("TEST001")
+	if len(commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(commands))
+	}
+	want := "GET OPTION FROM DeviceName"
+	if commands[0] != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0])
+	}
+}
+
+func TestSendShellCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.SendShellCommand("TEST001", "date"); err != nil {
+		t.Fatalf("SendShellCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands("TEST001")
+	if len(commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(commands))
+	}
+	want := "Shell date"
+	if commands[0] != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0])
+	}
+}
+
+func TestSendQueryUsersCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.SendQueryUsersCommand("TEST001"); err != nil {
+		t.Fatalf("SendQueryUsersCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands("TEST001")
+	if len(commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(commands))
+	}
+	want := "DATA QUERY USERINFO"
+	if commands[0] != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0])
+	}
+}
+
+func TestSendLogCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.SendLogCommand("TEST001"); err != nil {
+		t.Fatalf("SendLogCommand failed: %v", err)
+	}
+
+	commands := server.DrainCommands("TEST001")
+	if len(commands) != 1 {
+		t.Fatalf("Expected 1 command, got %d", len(commands))
+	}
+	if commands[0] != "LOG" {
+		t.Errorf("Expected LOG command, got %s", commands[0])
+	}
+}
+
 func TestParseQueryParams(t *testing.T) {
 	testURL := "http://example.com/iclock/cdata?SN=TEST001&table=ATTLOG&Stamp=1234567890"
 
@@ -2029,6 +2117,81 @@ func TestSendInfoCommand_ReturnsError(t *testing.T) {
 
 	// Second should fail due to queue limit.
 	err := server.SendInfoCommand(sn)
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendCheckCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	if err := server.SendCheckCommand(sn); err != nil {
+		t.Fatalf("SendCheckCommand failed: %v", err)
+	}
+
+	err := server.SendCheckCommand(sn)
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendGetOptionCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	if err := server.SendGetOptionCommand(sn, "DeviceName"); err != nil {
+		t.Fatalf("SendGetOptionCommand failed: %v", err)
+	}
+
+	err := server.SendGetOptionCommand(sn, "FWVersion")
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendShellCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	if err := server.SendShellCommand(sn, "date"); err != nil {
+		t.Fatalf("SendShellCommand failed: %v", err)
+	}
+
+	err := server.SendShellCommand(sn, "uptime")
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendQueryUsersCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	if err := server.SendQueryUsersCommand(sn); err != nil {
+		t.Fatalf("SendQueryUsersCommand failed: %v", err)
+	}
+
+	err := server.SendQueryUsersCommand(sn)
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull, got %v", err)
+	}
+}
+
+func TestSendLogCommand_ReturnsError(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(1))
+	defer server.Close()
+	sn := "TEST001"
+
+	if err := server.SendLogCommand(sn); err != nil {
+		t.Fatalf("SendLogCommand failed: %v", err)
+	}
+
+	err := server.SendLogCommand(sn)
 	if !errors.Is(err, ErrCommandQueueFull) {
 		t.Errorf("expected ErrCommandQueueFull, got %v", err)
 	}

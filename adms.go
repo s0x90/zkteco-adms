@@ -1291,6 +1291,76 @@ func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
 	return s.QueueCommand(serialNumber, cmd)
 }
 
+// SendCheckCommand queues a CHECK (heartbeat) command to verify device
+// responsiveness. The device confirms by POSTing to /iclock/devicecmd
+// with CMD=CHECK and Return=0.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendCheckCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "CHECK")
+}
+
+// SendGetOptionCommand queues a GET OPTION command to retrieve a device
+// configuration value. The device confirms by POSTing to /iclock/devicecmd
+// with CMD=GET OPTION.
+//
+// Confirmed keys on ZAM180-NF firmware: DeviceName, FWVersion, IPAddress,
+// MACAddress, Platform, WorkCode, LockCount, UserCount, FPCount,
+// AttLogCount, FaceCount, TransactionCount, MaxUserCount, MaxAttLogCount,
+// MaxFingerCount, MaxFaceCount.
+//
+// The option value is typically delivered via the device info push
+// (POST /iclock/cdata) rather than in the command confirmation body.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) error {
+	cmd := fmt.Sprintf("GET OPTION FROM %s", key)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendShellCommand queues a Shell command for execution on the device.
+// The device executes the command and confirms by POSTing to /iclock/devicecmd
+// with CMD=Shell, Return=0, and the output in the Content field.
+//
+// WARNING: This executes arbitrary commands on the device's Linux OS.
+// Use with extreme caution — incorrect commands can brick the device.
+//
+// Example:
+//
+//	server.SendShellCommand("SERIAL001", "date")
+//	// Device responds: ID=1&Return=0&CMD=Shell\nContent=Tue Mar 24 16:12:26 GMT 2026
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendShellCommand(serialNumber, command string) error {
+	cmd := fmt.Sprintf("Shell %s", command)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendQueryUsersCommand queues a DATA QUERY USERINFO command to request
+// all user records from the device. The device responds by pushing user
+// data via POST /iclock/cdata (not via the command confirmation endpoint).
+//
+// To query a specific user by PIN, use [ADMSServer.QueueCommand] directly:
+//
+//	server.QueueCommand(serialNumber, "DATA QUERY USERINFO PIN=1")
+//
+// The device confirms the query by POSTing to /iclock/devicecmd with
+// CMD=DATA and Return=0.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "DATA QUERY USERINFO")
+}
+
+// SendLogCommand queues a LOG command to request log data from the device.
+// The device confirms by POSTing to /iclock/devicecmd with CMD=LOG
+// and Return=0.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendLogCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "LOG")
+}
+
 // ParseQueryParams parses URL query parameters commonly used in iclock protocol.
 func ParseQueryParams(urlStr string) (map[string]string, error) {
 	u, err := url.Parse(urlStr)
