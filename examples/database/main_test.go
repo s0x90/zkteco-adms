@@ -178,6 +178,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
+
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Write(body)
@@ -198,6 +203,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	if !strings.Contains(logOutput, "foo=bar") {
 		t.Errorf("expected query params in log; got: %s", logOutput)
 	}
+
+	// Verify HTTP dump was captured (dumpWriter redirect prevents test output pollution).
+	if dumpBuf.Len() == 0 {
+		t.Error("expected HTTP dump output to be captured in dumpBuf")
+	}
 }
 
 func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
@@ -205,6 +215,11 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
@@ -218,9 +233,9 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large body; got: %s", dumpOutput)
 	}
 }
 
@@ -229,6 +244,11 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
 
 	largeResp := strings.Repeat("B", maxLogBody+500)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -241,9 +261,9 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large response body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large response body; got: %s", dumpOutput)
 	}
 }
 
@@ -982,4 +1002,45 @@ func TestAttendanceHandler_MultipleUsers(t *testing.T) {
 	if resp.Total != 4 {
 		t.Errorf("expected 4 total records, got %d", resp.Total)
 	}
+}
+
+// ---------- JSON encode error paths ----------
+
+// errWriter is an http.ResponseWriter whose Write always returns an error,
+// exercising the json.Encode error path in handler functions.
+type errWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *errWriter) Header() http.Header  { return w.header }
+func (w *errWriter) WriteHeader(code int) { w.status = code }
+func (w *errWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write error")
+}
+
+func TestAttendanceHandler_EncodeError(t *testing.T) {
+	t.Helper()
+
+	store := NewAttendanceStore()
+	handler := attendanceHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
+	w := &errWriter{header: make(http.Header)}
+	handler.ServeHTTP(w, req)
+
+	t.Log("handler did not panic on encode error")
+}
+
+func TestSummaryHandler_EncodeError(t *testing.T) {
+	t.Helper()
+
+	store := NewAttendanceStore()
+	handler := summaryHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
+	w := &errWriter{header: make(http.Header)}
+	handler.ServeHTTP(w, req)
+
+	t.Log("handler did not panic on encode error")
 }

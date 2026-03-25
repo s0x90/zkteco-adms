@@ -26,6 +26,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -36,6 +37,11 @@ import (
 
 // maxLogBody is the maximum number of bytes logged for request/response bodies.
 const maxLogBody = 1024
+
+// dumpWriter is the destination for multi-line HTTP dump output. Defaults to
+// os.Stderr so that dump blocks render with real newlines in the console.
+// Tests may reassign this to capture output.
+var dumpWriter io.Writer = os.Stderr
 
 // statusRecorder wraps http.ResponseWriter to capture the status code and
 // response body for debug logging.
@@ -167,8 +173,8 @@ func logMiddleware(next http.Handler) http.Handler {
 					"status", rec.status,
 					"duration", elapsed,
 					"panic", panicVal,
-					"dump", buf.String(),
 				)
+				fmt.Fprint(dumpWriter, buf.String())
 				panic(panicVal) // re-panic for upstream recovery
 			}
 
@@ -177,8 +183,8 @@ func logMiddleware(next http.Handler) http.Handler {
 				"path", fullPath,
 				"status", rec.status,
 				"duration", elapsed,
-				"dump", buf.String(),
 			)
+			fmt.Fprint(dumpWriter, buf.String())
 		}()
 
 		next.ServeHTTP(rec, r)
@@ -229,6 +235,16 @@ type deleteUserRequest struct {
 
 // rawCommandRequest is the JSON body for the raw command endpoint.
 type rawCommandRequest struct {
+	Command string `json:"command"`
+}
+
+// getOptionRequest is the JSON body for the get-option endpoint.
+type getOptionRequest struct {
+	Key string `json:"key"`
+}
+
+// shellRequest is the JSON body for the shell command endpoint.
+type shellRequest struct {
 	Command string `json:"command"`
 }
 
@@ -287,7 +303,14 @@ func requireDevice(w http.ResponseWriter, r *http.Request, server *zkadms.ADMSSe
 
 // queueOrFail queues a command and writes a JSON error on failure.
 func queueOrFail(w http.ResponseWriter, server *zkadms.ADMSServer, sn, cmd string) bool {
-	if err := server.QueueCommand(sn, cmd); err != nil {
+	return sendOrFail(w, sn, server.QueueCommand(sn, cmd))
+}
+
+// sendOrFail checks err from a Send*/QueueCommand call and writes a JSON
+// error response when non-nil.  Returns true when the command was queued
+// successfully.
+func sendOrFail(w http.ResponseWriter, sn string, err error) bool {
+	if err != nil {
 		if errors.Is(err, zkadms.ErrCommandQueueFull) {
 			writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
 		} else {
@@ -321,12 +344,7 @@ func handleInfo(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if err := server.SendInfoCommand(sn); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendInfoCommand(sn)) {
 			return
 		}
 		writeCommandOK(w, sn, "INFO")
@@ -378,9 +396,8 @@ func handleClearLog(server *zkadms.ADMSServer) http.Handler {
 	})
 }
 
-// handleAddUser queues a DATA UPDATE USERINFO command to add or update
-// a user on the device. Expects a JSON body with pin, name, privilege,
-// and card fields.
+// handleAddUser queues a DATA UPDATE USERINFO command to add or update a user on
+// the device. Expects a JSON body with pin, name, privilege, and card fields.
 func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sn, ok := requireDevice(w, r, server)
@@ -395,21 +412,14 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		data := fmt.Sprintf("PIN=%s\tName=%s\tPri=%d\tCard=%s",
-			req.PIN, req.Name, req.Privilege, req.Card)
-		if err := server.SendDataCommand(sn, "USERINFO", data); err != nil {
-			if errors.Is(err, zkadms.ErrCommandQueueFull) {
-				writeError(w, http.StatusServiceUnavailable, "command queue full for device "+sn)
-			} else {
-				writeError(w, http.StatusInternalServerError, err.Error())
-			}
+		if !sendOrFail(w, sn, server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card)) {
 			return
 		}
 		writeCommandOK(w, sn, "DATA UPDATE USERINFO")
 	})
 }
 
-// handleDeleteUser queues a DATA DEL_USER command to remove a user from
+// handleDeleteUser queues a DATA DELETE USERINFO command to remove a user from
 // the device. Expects a JSON body with a pin field.
 func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -425,11 +435,10 @@ func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		cmd := fmt.Sprintf("DATA DEL_USER PIN=%s", req.PIN)
-		if !queueOrFail(w, server, sn, cmd) {
+		if !sendOrFail(w, sn, server.SendUserDeleteCommand(sn, req.PIN)) {
 			return
 		}
-		writeCommandOK(w, sn, cmd)
+		writeCommandOK(w, sn, "DATA DELETE USERINFO")
 	})
 }
 
@@ -444,6 +453,99 @@ func handleOpenDoor(server *zkadms.ADMSServer) http.Handler {
 			return
 		}
 		writeCommandOK(w, sn, "CONTROL DEVICE 1 1")
+	})
+}
+
+// handleCheck queues a CHECK (heartbeat) command to verify device responsiveness.
+func handleCheck(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sn, ok := requireDevice(w, r, server)
+		if !ok {
+			return
+		}
+		if !sendOrFail(w, sn, server.SendCheckCommand(sn)) {
+			return
+		}
+		writeCommandOK(w, sn, "CHECK")
+	})
+}
+
+// handleGetOption queues a GET OPTION command to retrieve a device configuration
+// value. Expects a JSON body with a key field. The option value is delivered
+// asynchronously via the device info push, not in the command confirmation.
+func handleGetOption(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sn, ok := requireDevice(w, r, server)
+		if !ok {
+			return
+		}
+		var req getOptionRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.Key == "" {
+			writeError(w, http.StatusBadRequest, "key is required")
+			return
+		}
+		if !sendOrFail(w, sn, server.SendGetOptionCommand(sn, req.Key)) {
+			return
+		}
+		writeCommandOK(w, sn, "GET OPTION FROM "+req.Key)
+	})
+}
+
+// handleShell queues a Shell command for execution on the device's Linux OS.
+// Expects a JSON body with a command field.
+//
+// WARNING: This executes arbitrary commands on the device. Incorrect commands
+// can brick the device. Use with extreme caution.
+func handleShell(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sn, ok := requireDevice(w, r, server)
+		if !ok {
+			return
+		}
+		var req shellRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.Command == "" {
+			writeError(w, http.StatusBadRequest, "command is required")
+			return
+		}
+		if !sendOrFail(w, sn, server.SendShellCommand(sn, req.Command)) {
+			return
+		}
+		writeCommandOK(w, sn, "Shell "+req.Command)
+	})
+}
+
+// handleQueryUsers queues a DATA QUERY USERINFO command to request all user
+// records from the device. The data is pushed asynchronously via /iclock/cdata.
+func handleQueryUsers(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sn, ok := requireDevice(w, r, server)
+		if !ok {
+			return
+		}
+		if !sendOrFail(w, sn, server.SendQueryUsersCommand(sn)) {
+			return
+		}
+		writeCommandOK(w, sn, "DATA QUERY USERINFO")
+	})
+}
+
+// handleLog queues a LOG command to request log data from the device.
+func handleLog(server *zkadms.ADMSServer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sn, ok := requireDevice(w, r, server)
+		if !ok {
+			return
+		}
+		if !sendOrFail(w, sn, server.SendLogCommand(sn)) {
+			return
+		}
+		writeCommandOK(w, sn, "LOG")
 	})
 }
 
@@ -531,12 +633,17 @@ func newMux(server *zkadms.ADMSServer) *http.ServeMux {
 	// reboot, data wipe, door unlock, and user management operations.
 	mux.Handle("POST /api/devices/{sn}/reboot", logMiddleware(handleReboot(server)))
 	mux.Handle("POST /api/devices/{sn}/info", logMiddleware(handleInfo(server)))
+	mux.Handle("POST /api/devices/{sn}/check", logMiddleware(handleCheck(server)))
 	mux.Handle("POST /api/devices/{sn}/sync-time", logMiddleware(handleSyncTime(server)))
 	mux.Handle("POST /api/devices/{sn}/clear-data", logMiddleware(handleClearData(server)))
 	mux.Handle("POST /api/devices/{sn}/clear-log", logMiddleware(handleClearLog(server)))
 	mux.Handle("POST /api/devices/{sn}/users", logMiddleware(handleAddUser(server)))
 	mux.Handle("POST /api/devices/{sn}/users/delete", logMiddleware(handleDeleteUser(server)))
+	mux.Handle("POST /api/devices/{sn}/users/query", logMiddleware(handleQueryUsers(server)))
 	mux.Handle("POST /api/devices/{sn}/open-door", logMiddleware(handleOpenDoor(server)))
+	mux.Handle("POST /api/devices/{sn}/get-option", logMiddleware(handleGetOption(server)))
+	mux.Handle("POST /api/devices/{sn}/shell", logMiddleware(handleShell(server)))
+	mux.Handle("POST /api/devices/{sn}/log", logMiddleware(handleLog(server)))
 	mux.Handle("POST /api/devices/{sn}/command", logMiddleware(handleRawCommand(server)))
 
 	return mux
@@ -570,6 +677,16 @@ func run(ctx context.Context, addr string, devices []string) error {
 				record.Status,
 				zkadms.VerifyModeName(record.VerifyMode),
 				record.SerialNumber)
+		}),
+
+		// Log command confirmations from devices.
+		zkadms.WithOnCommandResult(func(_ context.Context, result zkadms.CommandResult) {
+			status := "OK"
+			if result.ReturnCode != 0 {
+				status = fmt.Sprintf("FAIL (code %d)", result.ReturnCode)
+			}
+			fmt.Printf("Command result: device=%s id=%d cmd=%q status=%s\n",
+				result.SerialNumber, result.ID, result.Command, status)
 		}),
 	)
 	defer server.Close()
@@ -611,23 +728,54 @@ func run(ctx context.Context, addr string, devices []string) error {
 	fmt.Println()
 	fmt.Println("  POST /api/devices/{sn}/reboot     - Reboot device")
 	fmt.Println("  POST /api/devices/{sn}/info       - Request device info")
+	fmt.Println("  POST /api/devices/{sn}/check      - Heartbeat / connectivity check")
 	fmt.Println("  POST /api/devices/{sn}/sync-time  - Sync device clock")
 	fmt.Println("  POST /api/devices/{sn}/clear-data - Clear attendance data")
 	fmt.Println("  POST /api/devices/{sn}/clear-log  - Clear operation log")
 	fmt.Println("  POST /api/devices/{sn}/users      - Add/update user (JSON body)")
 	fmt.Println("  POST /api/devices/{sn}/users/delete - Delete user (JSON body)")
+	fmt.Println("  POST /api/devices/{sn}/users/query  - Query all users from device")
 	fmt.Println("  POST /api/devices/{sn}/open-door  - Trigger door relay")
+	fmt.Println("  POST /api/devices/{sn}/get-option - Get device option (JSON body)")
+	fmt.Println("  POST /api/devices/{sn}/shell      - Execute shell command (JSON body)")
+	fmt.Println("  POST /api/devices/{sn}/log        - Request log data")
 	fmt.Println("  POST /api/devices/{sn}/command    - Send raw command (JSON body)")
 	fmt.Println()
 	fmt.Println("Example usage with curl:")
-	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/reboot`)
-	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/info`)
-	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/users \`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/info`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/check`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/reboot`)
+	fmt.Println()
+	fmt.Println(`  # Add a user`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/users \`)
 	fmt.Println(`       -H 'Content-Type: application/json' \`)
 	fmt.Println(`       -d '{"pin":"1001","name":"John Doe","privilege":0,"card":"12345678"}'`)
-	fmt.Println(`  curl -X POST http://localhost:8081/api/devices/<SN>/command \`)
+	fmt.Println()
+	fmt.Println(`  # Delete a user`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/users/delete \`)
 	fmt.Println(`       -H 'Content-Type: application/json' \`)
-	fmt.Println(`       -d '{"command":"ENROLL_FP PIN=1001"}'`)
+	fmt.Println(`       -d '{"pin":"1001"}'`)
+	fmt.Println()
+	fmt.Println(`  # Query all users from device (data pushed via /iclock/cdata)`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/users/query`)
+	fmt.Println()
+	fmt.Println(`  # Get a device option`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/get-option \`)
+	fmt.Println(`       -H 'Content-Type: application/json' \`)
+	fmt.Println(`       -d '{"key":"DeviceName"}'`)
+	fmt.Println()
+	fmt.Println(`  # Execute a shell command on the device (use with caution!)`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/shell \`)
+	fmt.Println(`       -H 'Content-Type: application/json' \`)
+	fmt.Println(`       -d '{"command":"date"}'`)
+	fmt.Println()
+	fmt.Println(`  # Request log data`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/log`)
+	fmt.Println()
+	fmt.Println(`  # Send a raw command`)
+	fmt.Println(`  curl -X POST http://localhost:8080/api/devices/<SN>/command \`)
+	fmt.Println(`       -H 'Content-Type: application/json' \`)
+	fmt.Println(`       -d '{"command":"CHECK"}'`)
 	fmt.Println()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -639,7 +787,7 @@ func run(ctx context.Context, addr string, devices []string) error {
 }
 
 func main() {
-	addr := flag.String("addr", ":8081", "HTTP listen address")
+	addr := flag.String("addr", ":8080", "HTTP listen address")
 	devicesFlag := flag.String("devices", "", "comma-separated device serial numbers to pre-register")
 	flag.Parse()
 

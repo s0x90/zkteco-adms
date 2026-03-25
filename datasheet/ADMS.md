@@ -143,6 +143,12 @@ USER DEL PIN=1002
 
 The device will execute these and then respond "OK".
 
+> **⚠ Correction (confirmed on real hardware):** The `USER ADD` / `USER DEL`
+> syntax shown above is from the original datasheet but is **rejected by real
+> devices** (ZAM180-NF firmware, Return=-1002). See
+> [Confirmed Server→Device Commands](#confirmed-serverdevice-commands) below
+> for the correct wire formats.
+
 5. Photo / Face Templates (optional)
 
 Some devices also send photos or templates with:
@@ -216,3 +222,195 @@ Original:
 
 [Link-1](https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/)
 [Link-2](https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156)
+
+---
+
+# Real Device Protocol Findings
+
+The information below was discovered by probing a real ZKTeco device and
+observing the actual HTTP traffic. The test device:
+
+- **Model**: SpeedFace-V5L-RFID[TI]
+- **Firmware**: ZAM180-NF-Ver1.1.17
+- **User-Agent**: `iClock Proxy/1.09`
+- **Platform**: ZAM180_TFT
+- **MAC**: 00:17:61:12:f8:db
+
+## Command Wire Format
+
+When the device polls `GET /iclock/getrequest?SN=...`, pending commands are
+delivered in the response body using this format:
+
+```
+C:<ID>:<CMD>\n
+```
+
+Where `<ID>` is a monotonically increasing integer assigned by the server.
+Multiple commands can be sent in a single response:
+
+```
+C:1:INFO
+C:2:CHECK
+C:3:DATA UPDATE USERINFO PIN=1001	Name=John Doe	Privilege=0	Card=12345678
+```
+
+## Command Confirmation
+
+After executing each command, the device POSTs the result to
+`/iclock/devicecmd?SN=...`:
+
+```
+ID=1&Return=0&CMD=INFO
+```
+
+### Batched Confirmations
+
+The device **batches multiple confirmations** in a single POST body,
+one per line:
+
+```
+ID=1&Return=0&CMD=DATA
+ID=2&Return=0&CMD=DATA
+ID=3&Return=0&CMD=CHECK
+```
+
+### Shell Command Response Format
+
+Shell command confirmations use a multiline format with a `Content` field:
+
+```
+ID=32
+Return=0
+CMD=Shell
+Content=Tue Mar 24 16:12:26 GMT 2026
+```
+
+## Command Return Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `-1` | Command not supported, or no data available |
+| `-2` | File operation failed |
+| `-1002` | Invalid command syntax |
+| `-1004` | Table/feature not supported on this device model |
+
+## Confirmed Server→Device Commands
+
+### ACCEPTED (Return=0)
+
+| Command | CMD echo | Description |
+|---------|----------|-------------|
+| `INFO` | `INFO` | Returns full device info (firmware, serial, capabilities) in the response body of the next `/iclock/cdata` POST |
+| `CHECK` | `CHECK` | Heartbeat / connectivity check |
+| `LOG` | `LOG` | Request log data |
+| `Shell <command>` | `Shell` | Execute an arbitrary shell command on the device's Linux OS. Output returned in `Content=` field. **Use with extreme caution.** |
+
+#### GET OPTION
+
+```
+GET OPTION FROM <key>
+```
+
+CMD echo: `GET OPTION`. All of the following keys were accepted:
+
+| Key | Example Value | Description |
+|-----|---------------|-------------|
+| `DeviceName` | `SpeedFace-V5L-RFID[TI]` | Device model name |
+| `FWVersion` | `ZAM180-NF-Ver1.1.17` | Firmware version |
+| `IPAddress` | `192.168.1.235` | Device IP address |
+| `MACAddress` | `00:17:61:12:f8:db` | Device MAC address |
+| `Platform` | `ZAM180_TFT` | Hardware platform |
+| `WorkCode` | `0` | Work code setting |
+| `LockCount` | `0` | Door lock count |
+| `UserCount` | `2` | Current enrolled users |
+| `FPCount` | `0` | Fingerprint templates |
+| `AttLogCount` | `0` | Attendance log entries |
+| `FaceCount` | `2` | Face templates |
+| `TransactionCount` | `0` | Transaction count |
+| `MaxUserCount` | `6000` | Max user capacity |
+| `MaxAttLogCount` | `200000` | Max attendance log capacity |
+| `MaxFingerCount` | `6000` | Max fingerprint capacity |
+| `MaxFaceCount` | `1200` | Max face template capacity |
+
+#### User Management
+
+**Add / update user** (tab-separated key=value pairs):
+
+```
+DATA UPDATE USERINFO PIN=<pin>\tName=<name>\tPrivilege=<priv>\tCard=<card>
+```
+
+CMD echo: `DATA`. Privilege values: `0` = normal user, `14` = admin.
+
+**Delete user:**
+
+```
+DATA DELETE USERINFO PIN=<pin>
+```
+
+CMD echo: `DATA`.
+
+> **Important:** The original datasheet shows `USER ADD` and `USER DEL` —
+> these are **rejected** by real devices with Return=-1002. The `DATA DEL`
+> shorthand (without the full word `DELETE`) is also rejected. Always use
+> `DATA UPDATE USERINFO` and `DATA DELETE USERINFO`.
+
+#### Data Queries
+
+```
+DATA QUERY USERINFO            # Query all users
+DATA QUERY USERINFO PIN=<n>    # Query a single user by PIN
+```
+
+CMD echo: `DATA`. Query results are **not** returned in the command
+confirmation. Instead, the device pushes data via `POST /iclock/cdata`
+with `table=OPERLOG` or other table parameters.
+
+### REJECTED
+
+| Command | Return | Meaning |
+|---------|--------|---------|
+| `DATA QUERY ATTLOG` | `-1` | No data available (empty attendance log) |
+| `PutFile FileName=options.cfg` | `-1` | File transfer failed (device attempted `GET /iclock/FileName=options.cfg?` but server wasn't serving the file) |
+| `GetFile FileName=options.cfg` | `-2` | File operation failed |
+| `DATA QUERY OPTIONS` | `-1004` | Table not supported |
+| `DATA QUERY TIMEZONE` | `-1004` | Table not supported (no access control on this model) |
+| `DATA QUERY FIRSTCARD` | `-1004` | Table not supported |
+| `DATA QUERY MULTIMCARD` | `-1004` | Table not supported |
+| `DATA QUERY INOUTFUN` | `-1004` | Table not supported |
+| `USER ADD PIN=...` | `-1002` | Invalid syntax (use `DATA UPDATE USERINFO` instead) |
+| `USER DEL PIN=...` | `-1002` | Invalid syntax (use `DATA DELETE USERINFO` instead) |
+| `DATA DEL USERINFO PIN=...` | `-1002` | Invalid syntax (must be `DATA DELETE`, not `DATA DEL`) |
+
+## Data Push Behavior
+
+When the device processes `DATA QUERY` commands, it does **not** return
+data in the command confirmation body. Instead it pushes data via separate
+HTTP requests:
+
+| Push endpoint | Content |
+|---------------|---------|
+| `POST /iclock/cdata?table=OPERLOG` | User records, operation logs |
+| `POST /iclock/cdata?table=BIODATA` | Face/fingerprint templates (binary) |
+| `POST /iclock/cdata?table=BIOPHOTO` | User photos (JPEG binary) |
+| `POST /iclock/cdata?table=options` | Device configuration options |
+
+## Device Polling Behavior
+
+- The device polls `GET /iclock/getrequest?SN=...` every **3–8 seconds**.
+- If no commands are pending, the server responds with `OK`.
+- The device identifies itself with `User-Agent: iClock Proxy/1.09`
+  (version varies by firmware).
+
+## PutFile Behavior
+
+When a `PutFile FileName=<name>` command is queued, the device attempts to
+download the file by issuing:
+
+```
+GET /iclock/FileName=<name>? HTTP/1.1
+```
+
+The server must serve the file content at that path for the operation to
+succeed. If the file is not available, the device reports Return=-1.
