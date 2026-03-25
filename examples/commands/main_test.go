@@ -244,6 +244,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	if !strings.Contains(logOutput, "foo=bar") {
 		t.Errorf("expected query params in log; got: %s", logOutput)
 	}
+
+	// Verify HTTP dump was captured (dumpWriter redirect prevents test output pollution).
+	if dumpBuf.Len() == 0 {
+		t.Error("expected HTTP dump output to be captured in dumpBuf")
+	}
 }
 
 func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
@@ -708,8 +713,8 @@ func TestAddUser_Success(t *testing.T) {
 
 	var resp commandResponse
 	decodeResponse(t, w, &resp)
-	if resp.Command != "USER ADD" {
-		t.Errorf("expected command USER ADD, got %q", resp.Command)
+	if resp.Command != "DATA UPDATE USERINFO" {
+		t.Errorf("expected command DATA UPDATE USERINFO, got %q", resp.Command)
 	}
 }
 
@@ -775,8 +780,8 @@ func TestDeleteUser_Success(t *testing.T) {
 
 	var resp commandResponse
 	decodeResponse(t, w, &resp)
-	if resp.Command != "USER DEL" {
-		t.Errorf("expected USER DEL command; got: %q", resp.Command)
+	if resp.Command != "DATA DELETE USERINFO" {
+		t.Errorf("expected DATA DELETE USERINFO command; got: %q", resp.Command)
 	}
 }
 

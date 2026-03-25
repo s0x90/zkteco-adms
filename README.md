@@ -206,7 +206,7 @@ err = server.SendUserDeleteCommand("DEVICE001", "12345")
 // Retrieve a device option (value arrives via device info push)
 err = server.SendGetOptionCommand("DEVICE001", "DeviceName")
 
-// Query all users (data pushed via POST /iclock/cdata)
+// Query all users (data pushed via POST /iclock/cdata; see note below)
 err = server.SendQueryUsersCommand("DEVICE001")
 
 // Execute a shell command on the device (use with caution!)
@@ -341,8 +341,8 @@ The following commands have been verified on real hardware (SpeedFace-V5L-RFID, 
 | `GET OPTION FROM <key>` | `SendGetOptionCommand` | `GET OPTION` | See key list below |
 | `DATA UPDATE USERINFO PIN=...` | `SendUserAddCommand` | `DATA` | Tab-separated fields |
 | `DATA DELETE USERINFO PIN=...` | `SendUserDeleteCommand` | `DATA` | |
-| `DATA QUERY USERINFO` | `SendQueryUsersCommand` | `DATA` | Data pushed via /iclock/cdata |
-| `DATA QUERY USERINFO PIN=<n>` | `QueueCommand` | `DATA` | Query single user |
+| `DATA QUERY USERINFO` | `SendQueryUsersCommand` | `DATA` | Data pushed via /iclock/cdata (see note) |
+| `DATA QUERY USERINFO PIN=<n>` | `QueueCommand` | `DATA` | Query single user (see note) |
 | `Shell <cmd>` | `SendShellCommand` | `Shell` | Executes OS commands |
 | `LOG` | `SendLogCommand` | `LOG` | Request log data |
 
@@ -351,7 +351,7 @@ Confirmed GET OPTION keys: `DeviceName`, `FWVersion`, `IPAddress`, `MACAddress`,
 **Important protocol notes:**
 - The ADMS datasheet documents user commands as `USER ADD` / `USER DEL`, but real devices reject these with error -1002. Use `DATA UPDATE USERINFO` / `DATA DELETE USERINFO` instead.
 - `DATA DEL USERINFO` (truncated) also fails — the full word `DELETE` is required.
-- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint.
+- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint. **Note:** This library currently only acknowledges `/iclock/cdata` pushes and does not parse or surface the returned data records. If you need to consume query results, you must handle and parse the `/iclock/cdata` requests yourself.
 - `Shell` commands execute on the device's Linux OS — use with extreme caution.
 
 ### Registry Payload Parsing

@@ -203,6 +203,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	if !strings.Contains(logOutput, "foo=bar") {
 		t.Errorf("expected query params in log; got: %s", logOutput)
 	}
+
+	// Verify HTTP dump was captured (dumpWriter redirect prevents test output pollution).
+	if dumpBuf.Len() == 0 {
+		t.Error("expected HTTP dump output to be captured in dumpBuf")
+	}
 }
 
 func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {

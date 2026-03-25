@@ -415,7 +415,7 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 		if !sendOrFail(w, sn, server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card)) {
 			return
 		}
-		writeCommandOK(w, sn, "USER ADD")
+		writeCommandOK(w, sn, "DATA UPDATE USERINFO")
 	})
 }
 
@@ -438,7 +438,7 @@ func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 		if !sendOrFail(w, sn, server.SendUserDeleteCommand(sn, req.PIN)) {
 			return
 		}
-		writeCommandOK(w, sn, "USER DEL")
+		writeCommandOK(w, sn, "DATA DELETE USERINFO")
 	})
 }
 

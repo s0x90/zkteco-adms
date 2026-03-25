@@ -173,8 +173,8 @@ func run(ctx context.Context, cfg probeConfig) error {
 	// Track results.
 	// Commands are queued FIFO and assigned IDs at write-time, so we
 	// correlate results by maintaining a queue of queued candidates in
-	// order. When a confirmation arrives, the first unmatched candidate
-	// with a matching command prefix is paired.
+	// order. When a confirmation arrives, the next unmatched candidate
+	// is paired by FIFO index (no command-prefix matching is performed).
 	var (
 		mu      sync.Mutex
 		results []result
@@ -287,15 +287,15 @@ func run(ctx context.Context, cfg probeConfig) error {
 				continue
 			}
 
-			mu.Lock()
-			queued = append(queued, c)
-			queuedCount := len(queued)
-			mu.Unlock()
-
 			if err := server.QueueCommand(cfg.sn, c.cmd); err != nil {
 				fmt.Printf("  QUEUE ERROR: %s: %v\n", c.cmd, err)
 				continue
 			}
+
+			mu.Lock()
+			queued = append(queued, c)
+			queuedCount := len(queued)
+			mu.Unlock()
 			tag := "[SAFE]"
 			if !c.safe {
 				tag = "[CAUTION]"

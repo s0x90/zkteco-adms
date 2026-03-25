@@ -1337,15 +1337,20 @@ func (s *ADMSServer) SendShellCommand(serialNumber, command string) error {
 }
 
 // SendQueryUsersCommand queues a DATA QUERY USERINFO command to request
-// all user records from the device. The device responds by pushing user
-// data via POST /iclock/cdata (not via the command confirmation endpoint).
+// all user records from the device. According to the device protocol, the
+// device responds by pushing user data via POST /iclock/cdata (not via the
+// command confirmation endpoint).
+//
+// NOTE: This library currently only acknowledges such /iclock/cdata pushes
+// and does not parse, dispatch, or surface the returned user records via any
+// callback. Only the command confirmation is processed, which the device
+// sends by POSTing to /iclock/devicecmd with CMD=DATA and Return=0.
+// If you need to consume the actual query results, you must handle and parse
+// the /iclock/cdata requests yourself.
 //
 // To query a specific user by PIN, use [ADMSServer.QueueCommand] directly:
 //
 //	server.QueueCommand(serialNumber, "DATA QUERY USERINFO PIN=1")
-//
-// The device confirms the query by POSTing to /iclock/devicecmd with
-// CMD=DATA and Return=0.
 //
 // It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) error {
