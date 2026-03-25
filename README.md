@@ -138,6 +138,7 @@ defer server.Close()
 | `WithOnAttendance` | nil | Attendance record callback |
 | `WithOnDeviceInfo` | nil | Device info callback |
 | `WithOnRegistry` | nil | Device registry callback |
+| `WithOnCommandResult` | nil | Command confirmation callback (see [CommandResult](#commandresult)) |
 
 ### Handling Attendance Records
 
@@ -172,6 +173,18 @@ zkadms.WithOnRegistry(func(ctx context.Context, sn string, info map[string]strin
 })
 ```
 
+### Handling Command Results
+
+```go
+zkadms.WithOnCommandResult(func(ctx context.Context, result zkadms.CommandResult) {
+    // Called when a device reports the result of a command.
+    // result.SerialNumber - Device that executed the command
+    // result.ID           - Command ID assigned by the server
+    // result.ReturnCode   - 0 = success, non-zero = error
+    // result.Command      - Command type echoed back (e.g. "INFO", "DATA")
+})
+```
+
 ### Sending Commands to Devices
 
 ```go
@@ -181,8 +194,26 @@ err := server.QueueCommand("DEVICE001", "CHECK")
 // Request device information
 err = server.SendInfoCommand("DEVICE001")
 
-// Send data query command
-err = server.SendDataCommand("DEVICE001", "USER", "user data")
+// Heartbeat / connectivity check
+err = server.SendCheckCommand("DEVICE001")
+
+// Add or update a user on the device
+err = server.SendUserAddCommand("DEVICE001", "12345", "John Doe", 0, "")
+
+// Delete a user from the device
+err = server.SendUserDeleteCommand("DEVICE001", "12345")
+
+// Retrieve a device option (value arrives via device info push)
+err = server.SendGetOptionCommand("DEVICE001", "DeviceName")
+
+// Query all users (data pushed via POST /iclock/cdata; see note below)
+err = server.SendQueryUsersCommand("DEVICE001")
+
+// Execute a shell command on the device (use with caution!)
+err = server.SendShellCommand("DEVICE001", "date")
+
+// Request log data
+err = server.SendLogCommand("DEVICE001")
 
 // Drain all pending commands for a device
 cmds := server.DrainCommands("DEVICE001")
@@ -253,6 +284,75 @@ server.Close()
 | `/iclock/getrequest` | GET | Device polls for pending commands |
 | `/iclock/devicecmd` | POST | Device reports command execution results |
 | `/iclock/inspect` | GET | Returns JSON summary of devices and their current status (opt-in via `WithEnableInspect`) |
+
+### Command Wire Format
+
+When a device polls `/iclock/getrequest`, pending commands are sent as:
+
+```
+C:<ID>:<CMD>\n
+```
+
+Where `<ID>` is a monotonically increasing integer assigned by the server. For example:
+
+```
+C:1:INFO
+C:2:DATA UPDATE USERINFO PIN=1001	Name=John Doe	Privilege=0	Card=12345678
+C:3:DATA DELETE USERINFO PIN=1001
+```
+
+After executing a command, the device POSTs the result to `/iclock/devicecmd` with a body like:
+
+```
+ID=1&Return=0&CMD=INFO
+```
+
+A `Return` value of `0` indicates success. The parsed result is delivered to the callback registered via `WithOnCommandResult`.
+
+Devices may batch multiple confirmations in a single POST:
+
+```
+ID=1&Return=0&CMD=DATA
+ID=2&Return=0&CMD=DATA
+```
+
+The parser handles both batched and multiline formats (e.g. Shell command responses with `Content=` fields).
+
+### Command Return Codes
+
+These error codes have been confirmed on real ZAM180-NF firmware:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `-1` | Command not supported or no data available |
+| `-2` | File operation failed |
+| `-1002` | Invalid command syntax |
+| `-1004` | Table/feature not supported on this device model |
+
+### Confirmed Commands
+
+The following commands have been verified on real hardware (SpeedFace-V5L-RFID, ZAM180-NF-Ver1.1.17 firmware):
+
+| Command | Convenience Method | Confirmed CMD echo | Notes |
+|---------|-------------------|-------------------|-------|
+| `INFO` | `SendInfoCommand` | `INFO` | Returns full device info |
+| `CHECK` | `SendCheckCommand` | `CHECK` | Heartbeat/ping |
+| `GET OPTION FROM <key>` | `SendGetOptionCommand` | `GET OPTION` | See key list below |
+| `DATA UPDATE USERINFO PIN=...` | `SendUserAddCommand` | `DATA` | Tab-separated fields |
+| `DATA DELETE USERINFO PIN=...` | `SendUserDeleteCommand` | `DATA` | |
+| `DATA QUERY USERINFO` | `SendQueryUsersCommand` | `DATA` | Data pushed via /iclock/cdata (see note) |
+| `DATA QUERY USERINFO PIN=<n>` | `QueueCommand` | `DATA` | Query single user (see note) |
+| `Shell <cmd>` | `SendShellCommand` | `Shell` | Executes OS commands |
+| `LOG` | `SendLogCommand` | `LOG` | Request log data |
+
+Confirmed GET OPTION keys: `DeviceName`, `FWVersion`, `IPAddress`, `MACAddress`, `Platform`, `WorkCode`, `LockCount`, `UserCount`, `FPCount`, `AttLogCount`, `FaceCount`, `TransactionCount`, `MaxUserCount`, `MaxAttLogCount`, `MaxFingerCount`, `MaxFaceCount`.
+
+**Important protocol notes:**
+- The ADMS datasheet documents user commands as `USER ADD` / `USER DEL`, but real devices reject these with error -1002. Use `DATA UPDATE USERINFO` / `DATA DELETE USERINFO` instead.
+- `DATA DEL USERINFO` (truncated) also fails — the full word `DELETE` is required.
+- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint. **Note:** This library currently only acknowledges `/iclock/cdata` pushes and does not parse or surface the returned data records. If you need to consume query results, you must handle and parse the `/iclock/cdata` requests yourself.
+- `Shell` commands execute on the device's Linux OS — use with extreme caution.
 
 ### Registry Payload Parsing
 
@@ -336,6 +436,16 @@ See the [examples](./examples) directory for complete examples:
 - **[commands](./examples/commands)** - Device command management via REST API
 - **[database](./examples/database)** - Integration with database storage
 
+### Device Probe Tool
+
+The `cmd/probe` tool queues candidate commands to a real device and reports which ones succeed vs fail. Useful for discovering what your specific device model supports:
+
+```bash
+go run ./cmd/probe -addr :8080 -sn YOUR_SERIAL_NUMBER
+```
+
+Use `-destructive` to include potentially dangerous commands (CONTROL DEVICE, SET OPTION, etc.).
+
 ### Running Examples
 
 ```bash
@@ -345,6 +455,79 @@ go run ./examples/basic
 Then configure your ZKTeco device to connect to:
 ```
 http://your-server:8080/iclock/
+```
+
+#### Commands Example
+
+The commands example exposes a REST API for managing devices:
+
+```bash
+go run ./examples/commands -devices ABCD12345678
+```
+
+Endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/devices` | List all connected devices |
+| GET | `/api/devices/{sn}` | Device detail |
+| POST | `/api/devices/{sn}/reboot` | Reboot device |
+| POST | `/api/devices/{sn}/info` | Request device info |
+| POST | `/api/devices/{sn}/check` | Heartbeat / connectivity check |
+| POST | `/api/devices/{sn}/sync-time` | Sync device clock |
+| POST | `/api/devices/{sn}/clear-data` | Clear attendance data |
+| POST | `/api/devices/{sn}/clear-log` | Clear operation log |
+| POST | `/api/devices/{sn}/users` | Add/update user (JSON body) |
+| POST | `/api/devices/{sn}/users/delete` | Delete user (JSON body) |
+| POST | `/api/devices/{sn}/users/query` | Query all users from device |
+| POST | `/api/devices/{sn}/open-door` | Trigger door relay |
+| POST | `/api/devices/{sn}/get-option` | Get device option (JSON body) |
+| POST | `/api/devices/{sn}/shell` | Execute shell command (JSON body) |
+| POST | `/api/devices/{sn}/log` | Request log data |
+| POST | `/api/devices/{sn}/command` | Send raw command (JSON body) |
+
+Example curl usage:
+
+```bash
+# Request device info
+curl -X POST http://localhost:8080/api/devices/<SN>/info
+
+# Heartbeat check
+curl -X POST http://localhost:8080/api/devices/<SN>/check
+
+# Add a user
+curl -X POST http://localhost:8080/api/devices/<SN>/users \
+     -H 'Content-Type: application/json' \
+     -d '{"pin":"1001","name":"John Doe","privilege":0,"card":"12345678"}'
+
+# Delete a user
+curl -X POST http://localhost:8080/api/devices/<SN>/users/delete \
+     -H 'Content-Type: application/json' \
+     -d '{"pin":"1001"}'
+
+# Query all users from device (data pushed via /iclock/cdata)
+curl -X POST http://localhost:8080/api/devices/<SN>/users/query
+
+# Get a device option
+curl -X POST http://localhost:8080/api/devices/<SN>/get-option \
+     -H 'Content-Type: application/json' \
+     -d '{"key":"DeviceName"}'
+
+# Execute a shell command on the device (use with caution!)
+curl -X POST http://localhost:8080/api/devices/<SN>/shell \
+     -H 'Content-Type: application/json' \
+     -d '{"command":"date"}'
+
+# Request log data
+curl -X POST http://localhost:8080/api/devices/<SN>/log
+
+# Reboot device
+curl -X POST http://localhost:8080/api/devices/<SN>/reboot
+
+# Send a raw command
+curl -X POST http://localhost:8080/api/devices/<SN>/command \
+     -H 'Content-Type: application/json' \
+     -d '{"command":"GET OPTION FROM FWVersion"}'
 ```
 
 ## Testing
@@ -386,6 +569,9 @@ Represents a single attendance transaction with `UserID`, `Timestamp`, `Status`,
 #### `DeviceSnapshot`
 JSON representation of a device in the `/iclock/inspect` response.
 
+#### `CommandResult`
+Represents the result of a command execution reported by a device. Fields: `SerialNumber`, `ID` (int64), `ReturnCode` (int, 0 = success), and `Command` (string).
+
 ### Constructor
 
 #### `NewADMSServer(opts ...Option) *ADMSServer`
@@ -410,6 +596,7 @@ Creates a new ADMS server instance configured with the given options.
 | `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
 | `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
 | `WithOnRegistry(func(context.Context, string, map[string]string))` | Set registry callback |
+| `WithOnCommandResult(func(context.Context, CommandResult))` | Set command confirmation callback |
 
 ### Methods
 
@@ -423,7 +610,13 @@ Creates a new ADMS server instance configured with the given options.
 | `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
 | `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
 | `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
-| `SendDataCommand(serialNumber, table, data string) error` | Queue a DATA QUERY command |
+| `SendCheckCommand(serialNumber string) error` | Queue a CHECK (heartbeat) command |
+| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a DATA UPDATE USERINFO command |
+| `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a DATA DELETE USERINFO command |
+| `SendGetOptionCommand(serialNumber, key string) error` | Queue a GET OPTION FROM command |
+| `SendQueryUsersCommand(serialNumber string) error` | Queue a DATA QUERY USERINFO command |
+| `SendShellCommand(serialNumber, command string) error` | Queue a Shell command (use with caution) |
+| `SendLogCommand(serialNumber string) error` | Queue a LOG command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |

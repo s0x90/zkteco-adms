@@ -219,6 +219,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
+
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Write(body)
@@ -239,6 +244,11 @@ func TestLogMiddleware_WithRequestBody(t *testing.T) {
 	if !strings.Contains(logOutput, "foo=bar") {
 		t.Errorf("expected query params in log; got: %s", logOutput)
 	}
+
+	// Verify HTTP dump was captured (dumpWriter redirect prevents test output pollution).
+	if dumpBuf.Len() == 0 {
+		t.Error("expected HTTP dump output to be captured in dumpBuf")
+	}
 }
 
 func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
@@ -246,6 +256,11 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
@@ -259,9 +274,9 @@ func TestLogMiddleware_WithLargeRequestBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large body; got: %s", dumpOutput)
 	}
 }
 
@@ -270,6 +285,11 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var dumpBuf bytes.Buffer
+	oldDumpWriter := dumpWriter
+	dumpWriter = &dumpBuf
+	t.Cleanup(func() { dumpWriter = oldDumpWriter })
 
 	largeResp := strings.Repeat("B", maxLogBody+500)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -282,9 +302,9 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 
 	handler.ServeHTTP(w, req)
 
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "truncated") {
-		t.Errorf("expected truncation in log for large response body; got: %s", logOutput)
+	dumpOutput := dumpBuf.String()
+	if !strings.Contains(dumpOutput, "truncated") {
+		t.Errorf("expected truncation in dump for large response body; got: %s", dumpOutput)
 	}
 }
 
@@ -461,6 +481,162 @@ func TestInfo_Success(t *testing.T) {
 	}
 }
 
+// ---------- check tests ----------
+
+func TestCheck_Success(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/check", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp commandResponse
+	decodeResponse(t, w, &resp)
+	if resp.Command != "CHECK" {
+		t.Errorf("expected command CHECK, got %q", resp.Command)
+	}
+}
+
+// ---------- get-option tests ----------
+
+func TestGetOption_Success(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	body := getOptionRequest{Key: "DeviceName"}
+	req := postJSON(t, "/api/devices/DEV001/get-option", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp commandResponse
+	decodeResponse(t, w, &resp)
+	if resp.Command != "GET OPTION FROM DeviceName" {
+		t.Errorf("expected command %q, got %q", "GET OPTION FROM DeviceName", resp.Command)
+	}
+}
+
+func TestGetOption_MissingKey(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	body := getOptionRequest{}
+	req := postJSON(t, "/api/devices/DEV001/get-option", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty key, got %d", w.Code)
+	}
+}
+
+func TestGetOption_InvalidJSON(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/get-option",
+		strings.NewReader("{bad"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// ---------- shell tests ----------
+
+func TestShell_Success(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	body := shellRequest{Command: "date"}
+	req := postJSON(t, "/api/devices/DEV001/shell", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp commandResponse
+	decodeResponse(t, w, &resp)
+	if resp.Command != "Shell date" {
+		t.Errorf("expected command %q, got %q", "Shell date", resp.Command)
+	}
+}
+
+func TestShell_MissingCommand(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	body := shellRequest{}
+	req := postJSON(t, "/api/devices/DEV001/shell", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty command, got %d", w.Code)
+	}
+}
+
+func TestShell_InvalidJSON(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/shell",
+		strings.NewReader("{bad"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// ---------- query users tests ----------
+
+func TestQueryUsers_Success(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/users/query", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp commandResponse
+	decodeResponse(t, w, &resp)
+	if resp.Command != "DATA QUERY USERINFO" {
+		t.Errorf("expected command %q, got %q", "DATA QUERY USERINFO", resp.Command)
+	}
+}
+
+// ---------- log tests ----------
+
+func TestLog_Success(t *testing.T) {
+	mux := newTestMux(t, "DEV001")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/log", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp commandResponse
+	decodeResponse(t, w, &resp)
+	if resp.Command != "LOG" {
+		t.Errorf("expected command LOG, got %q", resp.Command)
+	}
+}
+
 // ---------- sync-time tests ----------
 
 func TestSyncTime_Success(t *testing.T) {
@@ -604,8 +780,8 @@ func TestDeleteUser_Success(t *testing.T) {
 
 	var resp commandResponse
 	decodeResponse(t, w, &resp)
-	if !strings.Contains(resp.Command, "DATA DEL_USER PIN=1001") {
-		t.Errorf("expected DEL_USER command with PIN; got: %q", resp.Command)
+	if resp.Command != "DATA DELETE USERINFO" {
+		t.Errorf("expected DATA DELETE USERINFO command; got: %q", resp.Command)
 	}
 }
 
@@ -786,12 +962,17 @@ func TestCommandEndpoints_MethodNotAllowed(t *testing.T) {
 	postOnlyPaths := []string{
 		"/api/devices/DEV001/reboot",
 		"/api/devices/DEV001/info",
+		"/api/devices/DEV001/check",
 		"/api/devices/DEV001/sync-time",
 		"/api/devices/DEV001/clear-data",
 		"/api/devices/DEV001/clear-log",
 		"/api/devices/DEV001/users",
 		"/api/devices/DEV001/users/delete",
+		"/api/devices/DEV001/users/query",
 		"/api/devices/DEV001/open-door",
+		"/api/devices/DEV001/get-option",
+		"/api/devices/DEV001/shell",
+		"/api/devices/DEV001/log",
 		"/api/devices/DEV001/command",
 	}
 
@@ -1031,6 +1212,68 @@ func TestInfo_DeviceNotFound(t *testing.T) {
 	}
 }
 
+func TestCheck_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/check", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestGetOption_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	body := getOptionRequest{Key: "DeviceName"}
+	req := postJSON(t, "/api/devices/NOSUCH/get-option", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestShell_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	body := shellRequest{Command: "date"}
+	req := postJSON(t, "/api/devices/NOSUCH/shell", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestQueryUsers_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/users/query", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestLog_DeviceNotFound(t *testing.T) {
+	mux := newTestMux(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/NOSUCH/log", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
 // ---------- queue full tests for remaining handlers ----------
 
 func TestSyncTime_QueueFull(t *testing.T) {
@@ -1183,6 +1426,130 @@ func TestRawCommand_QueueFull(t *testing.T) {
 	}
 }
 
+func TestCheck_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/check", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/check", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetOption_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	body := getOptionRequest{Key: "DeviceName"}
+	req := postJSON(t, "/api/devices/DEV001/get-option", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	body = getOptionRequest{Key: "FWVersion"}
+	req = postJSON(t, "/api/devices/DEV001/get-option", body)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestShell_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	body := shellRequest{Command: "date"}
+	req := postJSON(t, "/api/devices/DEV001/shell", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	body = shellRequest{Command: "uptime"}
+	req = postJSON(t, "/api/devices/DEV001/shell", body)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestQueryUsers_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/users/query", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/users/query", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func TestLog_QueueFull(t *testing.T) {
+	server := zkadms.NewADMSServer(zkadms.WithMaxCommandsPerDevice(1))
+	t.Cleanup(func() { server.Close() })
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := newMux(server)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/log", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first should succeed, got %d", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/devices/DEV001/log", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
 // ---------- run() lifecycle tests with devices ----------
 
 func TestRun_WithDevices(t *testing.T) {
@@ -1281,6 +1648,24 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 	}
 	resp.Body.Close()
 
+	// Send command confirmation (Return=0) — triggers WithOnCommandResult callback (OK path).
+	cmdResult := "ID=1&Return=0&CMD=INFO"
+	resp, err = http.Post(base+"/iclock/devicecmd?SN=DEV001",
+		"text/plain", strings.NewReader(cmdResult))
+	if err != nil {
+		t.Fatalf("POST devicecmd (OK) failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Send command confirmation (Return=-1002) — triggers WithOnCommandResult FAIL path.
+	cmdResultFail := "ID=2&Return=-1002&CMD=BAD"
+	resp, err = http.Post(base+"/iclock/devicecmd?SN=DEV001",
+		"text/plain", strings.NewReader(cmdResultFail))
+	if err != nil {
+		t.Fatalf("POST devicecmd (FAIL) failed: %v", err)
+	}
+	resp.Body.Close()
+
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 
@@ -1291,5 +1676,69 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("run did not return within 5s")
+	}
+}
+
+// TestRun_InvalidDevice exercises the RegisterDevice error path in run()
+// when an invalid serial number is passed.
+func TestRun_InvalidDevice(t *testing.T) {
+	err := run(t.Context(), ":0", []string{"INVALID DEVICE!"})
+	if err == nil {
+		t.Fatal("expected error for invalid device serial number")
+	}
+	if !strings.Contains(err.Error(), "register device") {
+		t.Errorf("expected 'register device' in error, got: %v", err)
+	}
+}
+
+// ---------- writeJSON encode error ----------
+
+// errWriter is an http.ResponseWriter whose Write always returns an error,
+// exercising the json.Encode error path in writeJSON.
+type errWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *errWriter) Header() http.Header  { return w.header }
+func (w *errWriter) WriteHeader(code int) { w.status = code }
+func (w *errWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write error")
+}
+
+func TestWriteJSON_EncodeError(t *testing.T) {
+	// Suppress the slog.Warn that writeJSON emits on encode failure.
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := &errWriter{header: make(http.Header)}
+	writeJSON(w, http.StatusOK, map[string]string{"hello": "world"})
+
+	// writeJSON should not panic; it logs the error and returns silently.
+	if w.status != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.status)
+	}
+}
+
+// ---------- requireDevice empty serial number ----------
+
+func TestRequireDevice_EmptySN(t *testing.T) {
+	server := newTestServer(t, "DEV001")
+
+	// Build a request without routing through the mux so that
+	// r.PathValue("sn") returns "".
+	req := httptest.NewRequest(http.MethodPost, "/api/devices//reboot", nil)
+	w := httptest.NewRecorder()
+
+	sn, ok := requireDevice(w, req, server)
+	if ok {
+		t.Fatal("expected requireDevice to return false for empty SN")
+	}
+	if sn != "" {
+		t.Errorf("expected empty SN, got %q", sn)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
 	}
 }

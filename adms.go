@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -110,7 +111,9 @@ const (
 	respDeviceLimitMsg   = "Device limit reached"
 
 	// cmdFormat is the format string for writing pending commands.
-	cmdFormat = "C:%s\n"
+	// The device expects "C:<ID>:<CMD>\n" where ID is a monotonically
+	// increasing integer used to correlate command confirmations.
+	cmdFormat = "C:%d:%s\n"
 )
 
 // Verify mode constants for the ADMS protocol.
@@ -263,6 +266,15 @@ func WithOnRegistry(fn func(ctx context.Context, sn string, info map[string]stri
 	}
 }
 
+// WithOnCommandResult registers a callback invoked when a device reports the
+// result of a previously sent command via the /iclock/devicecmd endpoint.
+// The [CommandResult.ReturnCode] is 0 on success.
+func WithOnCommandResult(fn func(ctx context.Context, result CommandResult)) Option {
+	return func(s *ADMSServer) {
+		s.onCommandResult = fn
+	}
+}
+
 // WithBaseContext sets the parent context for the server. Callback contexts
 // are derived from this context. If not provided, [context.Background] is used.
 func WithBaseContext(ctx context.Context) Option {
@@ -376,25 +388,46 @@ type DeviceSnapshot struct {
 	Options      map[string]string `json:"options"`
 }
 
+// CommandResult represents the result of a command execution reported by a
+// device via the /iclock/devicecmd endpoint.
+//
+// After the server sends "C:<ID>:<CMD>\n" via /iclock/getrequest, the device
+// executes the command and POSTs back a confirmation containing the command ID
+// and a return code. A ReturnCode of 0 indicates success.
+type CommandResult struct {
+	// SerialNumber is the device that executed the command.
+	SerialNumber string
+	// ID is the command identifier assigned by the server.
+	ID int64
+	// ReturnCode is the device's result code (0 = success).
+	ReturnCode int
+	// Command is the command type echoed back by the device (e.g. "USER ADD"),
+	// if present in the confirmation body.
+	Command string
+}
+
 // ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
 //
 // Callbacks are dispatched asynchronously via an internal worker goroutine and
 // are designed not to block device HTTP responses during normal operation.
 // Under backpressure, dispatch may wait up to dispatchTimeout when the
-// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo], and
-// [WithOnRegistry] to register callbacks. Call Close to drain the callback
-// queue when the server is shutting down.
+// callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo],
+// [WithOnRegistry], and [WithOnCommandResult] to register callbacks.
+// Call Close to drain the callback queue when the server is shutting down.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
 	commandQueue map[string][]string // Serial number -> commands queue
 	queueMutex   sync.RWMutex
 
-	onAttendance func(ctx context.Context, record AttendanceRecord)
-	onDeviceInfo func(ctx context.Context, sn string, info map[string]string)
-	onRegistry   func(ctx context.Context, sn string, info map[string]string)
+	onAttendance    func(ctx context.Context, record AttendanceRecord)
+	onDeviceInfo    func(ctx context.Context, sn string, info map[string]string)
+	onRegistry      func(ctx context.Context, sn string, info map[string]string)
+	onCommandResult func(ctx context.Context, result CommandResult)
 
 	logger *slog.Logger
+
+	cmdID atomic.Int64 // monotonically increasing command ID counter
 
 	maxBodySize        int64         // maximum allowed request body size in bytes
 	callbackBufferSize int           // capacity of callbackCh (used at construction)
@@ -599,13 +632,16 @@ func (s *ADMSServer) requireDevice(w http.ResponseWriter, r *http.Request) (stri
 }
 
 // writeCommandsOrOK drains pending commands for a device and writes them as
-// "C:<cmd>\n" lines. If no commands are pending, it writes "OK".
+// "C:<id>:<cmd>\n" lines with monotonically increasing IDs. The device uses
+// the ID to confirm execution via /iclock/devicecmd.
+// If no commands are pending, it writes "OK".
 func (s *ADMSServer) writeCommandsOrOK(w http.ResponseWriter, serialNumber string) {
 	commands := s.DrainCommands(serialNumber)
 	w.WriteHeader(http.StatusOK)
 	if len(commands) > 0 {
 		for _, cmd := range commands {
-			fmt.Fprintf(w, cmdFormat, cmd)
+			id := s.cmdID.Add(1)
+			fmt.Fprintf(w, cmdFormat, id, cmd)
 		}
 	} else {
 		fmt.Fprint(w, respOK)
@@ -712,6 +748,18 @@ func (s *ADMSServer) dispatchDeviceInfo(sn string, info map[string]string) bool 
 // dispatchRegistry dispatches registry info to the configured callback.
 func (s *ADMSServer) dispatchRegistry(sn string, info map[string]string) bool {
 	return s.dispatchMapCallback(sn, info, s.onRegistry)
+}
+
+// dispatchCommandResult dispatches a command result to the configured callback.
+func (s *ADMSServer) dispatchCommandResult(result CommandResult) bool {
+	cb := s.onCommandResult
+	if cb == nil {
+		return true
+	}
+	ctx := s.baseCtx
+	return s.dispatchCallback(func() {
+		cb(ctx, result)
+	})
 }
 
 // bodyPreview returns a truncated preview of body for logging (max maxBodyPreviewLen bytes).
@@ -938,6 +986,15 @@ func (s *ADMSServer) HandleGetRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleDeviceCmd handles the /iclock/devicecmd endpoint.
+//
+// After the server sends "C:<ID>:<CMD>\n" via /iclock/getrequest, the device
+// executes the command and POSTs the result here. The body typically contains
+// key=value pairs separated by "&", for example:
+//
+//	ID=1&Return=0&CMD=USER ADD
+//
+// A Return value of 0 indicates success. The parsed result is dispatched to
+// the callback registered via [WithOnCommandResult].
 func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -950,17 +1007,97 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 
 	s.logRequest("devicecmd", r, serialNumber)
 
-	// Device is reporting command execution result
 	body, err := s.readBody(w, r)
 	if err != nil {
 		return
 	}
+
 	if len(body) > 0 {
-		s.logger.Debug("devicecmd body", "preview", bodyPreview(body))
+		s.logger.Debug("devicecmd body", "device", serialNumber, "preview", bodyPreview(body))
+	}
+
+	results := s.parseCommandResults(string(body), serialNumber)
+
+	for _, result := range results {
+		s.logger.Info("command result",
+			"device", serialNumber,
+			"id", result.ID,
+			"return", result.ReturnCode,
+			"cmd", result.Command)
+
+		if !s.dispatchCommandResult(result) {
+			s.logger.Warn("callback queue full, command result dropped",
+				"device", serialNumber, "id", result.ID)
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "OK: Command received: %s", string(body))
+	fmt.Fprint(w, respOK)
+}
+
+// parseCommandResults parses a devicecmd confirmation body into one or more
+// [CommandResult] values. The device uses two different formats:
+//
+// Batched format (ampersand-separated KV pairs, one result per line):
+//
+//	ID=1&Return=0&CMD=INFO\nID=2&Return=0&CMD=CHECK\n
+//
+// Shell/multiline format (newline-separated KV pairs, single result):
+//
+//	ID=32\nReturn=0\nCMD=Shell\nContent=output\n
+//
+// The parser accumulates key=value pairs into the current result. When a new
+// ID= is encountered, it flushes the previous result and starts a new one.
+// This handles both formats transparently.
+func (s *ADMSServer) parseCommandResults(body, serialNumber string) []CommandResult {
+	var results []CommandResult
+	current := CommandResult{SerialNumber: serialNumber}
+	hasID := false
+
+	flush := func() {
+		if hasID {
+			results = append(results, current)
+		}
+		current = CommandResult{SerialNumber: serialNumber}
+		hasID = false
+	}
+
+	// Normalize: treat both \n and & as delimiters between KV pairs.
+	body = strings.ReplaceAll(body, "\n", "&")
+	for part := range strings.SplitSeq(body, "&") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(key)) {
+		case "ID":
+			id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if err != nil {
+				s.logger.Warn("devicecmd: unparseable ID", "device", serialNumber, "value", value)
+				continue
+			}
+			// New ID means new result — flush the previous one.
+			if hasID {
+				flush()
+			}
+			current.ID = id
+			hasID = true
+		case "RETURN":
+			if code, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				current.ReturnCode = code
+			} else {
+				s.logger.Warn("devicecmd: unparseable Return", "device", serialNumber, "value", value)
+			}
+		case "CMD":
+			current.Command = strings.TrimSpace(value)
+		}
+	}
+	flush() // flush the last result
+	return results
 }
 
 // updateDeviceActivity updates the last activity timestamp for a device.
@@ -1116,17 +1253,117 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SendDataCommand formats and queues a DATA QUERY command.
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendDataCommand(serialNumber, table, data string) error {
-	cmd := fmt.Sprintf("DATA QUERY %s\n%s", table, data)
-	return s.QueueCommand(serialNumber, cmd)
-}
-
 // SendInfoCommand queues an INFO command to request device information.
 // It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
 	return s.QueueCommand(serialNumber, "INFO")
+}
+
+// SendUserAddCommand queues a DATA UPDATE USERINFO command to add or update
+// a user on the device. The wire format uses tab-separated key=value pairs:
+//
+//	DATA UPDATE USERINFO PIN=<pin>\tName=<name>\tPrivilege=<privilege>\tCard=<card>
+//
+// Privilege values: 0 = normal user, 14 = admin.
+//
+// Note: the ADMS datasheet documents this as "USER ADD", but real devices
+// (e.g. ZAM180-NF firmware) require the DATA UPDATE USERINFO prefix instead.
+// The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error {
+	cmd := fmt.Sprintf("DATA UPDATE USERINFO PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendUserDeleteCommand queues a DATA DELETE USERINFO command to remove a user
+// from the device. The wire format is:
+//
+//	DATA DELETE USERINFO PIN=<pin>
+//
+// Note: the ADMS datasheet documents this as "USER DEL", but real devices
+// (e.g. ZAM180-NF firmware) require the DATA DELETE USERINFO prefix instead.
+// The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
+	cmd := fmt.Sprintf("DATA DELETE USERINFO PIN=%s", pin)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendCheckCommand queues a CHECK (heartbeat) command to verify device
+// responsiveness. The device confirms by POSTing to /iclock/devicecmd
+// with CMD=CHECK and Return=0.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendCheckCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "CHECK")
+}
+
+// SendGetOptionCommand queues a GET OPTION command to retrieve a device
+// configuration value. The device confirms by POSTing to /iclock/devicecmd
+// with CMD=GET OPTION.
+//
+// Confirmed keys on ZAM180-NF firmware: DeviceName, FWVersion, IPAddress,
+// MACAddress, Platform, WorkCode, LockCount, UserCount, FPCount,
+// AttLogCount, FaceCount, TransactionCount, MaxUserCount, MaxAttLogCount,
+// MaxFingerCount, MaxFaceCount.
+//
+// The option value is typically delivered via the device info push
+// (POST /iclock/cdata) rather than in the command confirmation body.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) error {
+	cmd := fmt.Sprintf("GET OPTION FROM %s", key)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendShellCommand queues a Shell command for execution on the device.
+// The device executes the command and confirms by POSTing to /iclock/devicecmd
+// with CMD=Shell, Return=0, and the output in the Content field.
+//
+// WARNING: This executes arbitrary commands on the device's Linux OS.
+// Use with extreme caution — incorrect commands can brick the device.
+//
+// Example:
+//
+//	server.SendShellCommand("SERIAL001", "date")
+//	// Device responds: ID=1&Return=0&CMD=Shell\nContent=Tue Mar 24 16:12:26 GMT 2026
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendShellCommand(serialNumber, command string) error {
+	cmd := fmt.Sprintf("Shell %s", command)
+	return s.QueueCommand(serialNumber, cmd)
+}
+
+// SendQueryUsersCommand queues a DATA QUERY USERINFO command to request
+// all user records from the device. According to the device protocol, the
+// device responds by pushing user data via POST /iclock/cdata (not via the
+// command confirmation endpoint).
+//
+// NOTE: This library currently only acknowledges such /iclock/cdata pushes
+// and does not parse, dispatch, or surface the returned user records via any
+// callback. Only the command confirmation is processed, which the device
+// sends by POSTing to /iclock/devicecmd with CMD=DATA and Return=0.
+// If you need to consume the actual query results, you must handle and parse
+// the /iclock/cdata requests yourself.
+//
+// To query a specific user by PIN, use [ADMSServer.QueueCommand] directly:
+//
+//	server.QueueCommand(serialNumber, "DATA QUERY USERINFO PIN=1")
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "DATA QUERY USERINFO")
+}
+
+// SendLogCommand queues a LOG command to request log data from the device.
+// The device confirms by POSTing to /iclock/devicecmd with CMD=LOG
+// and Return=0.
+//
+// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendLogCommand(serialNumber string) error {
+	return s.QueueCommand(serialNumber, "LOG")
 }
 
 // ParseQueryParams parses URL query parameters commonly used in iclock protocol.
