@@ -9,7 +9,7 @@ A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendan
 
 This library provides a complete implementation of the HTTP-based ADMS protocol used by ZKTeco devices to communicate with servers. It handles device registration, attendance data collection, and remote command execution.
 
-Zero external dependencies — pure Go standard library.
+**Zero external dependencies — pure Go standard library.**
 
 ## Features
 
