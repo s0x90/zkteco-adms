@@ -1,40 +1,34 @@
-# Deferred Items for Next PR
+# Suggestions Not Yet Implemented
 
-The following high-severity architectural improvements were identified during
-Copilot code review of PR #23 and are intentionally deferred to a follow-up PR.
+Code review suggestions PR #25 that have not been addressed yet.
 
-## 1. Command-result correlation for `CMD=DATA` confirmations
+## 1. Probe: correlate command results by ID instead of string matching
 
-- **Severity:** High
-- **Problem:** Command IDs are generated when responses are written to
-  `/iclock/getrequest`, but the original command string is not stored anywhere
-  by ID. Later, command confirmations only expose the echoed device `CMD`,
-  which is often just `DATA` for multiple different commands (add-user,
-  delete-user, query-user). Callers cannot reliably correlate a `DATA`
-  confirmation back to the operation that triggered it.
-- **Current workaround:** The probe tool and callers infer correlation by FIFO
-  ordering, which is fragile when commands fail or are reordered.
-- **Planned fix:**
-  - Assign command IDs at queue time (not at write time).
-  - Maintain an `id -> original command` mapping internally.
-  - Surface the original queued command string in `CommandResult`.
-  - Optionally return the assigned ID from `QueueCommand` / helper methods
-    so callers can correlate confirmations unambiguously.
+**File:** `cmd/probe/main.go:205`
+**Severity:** Medium
 
-## 2. Query-user result ingestion via `/iclock/cdata`
+Correlation in the probe is still based on `QueuedCommand` string matching
+(plus FIFO fallback). Since `QueueCommand` now returns the assigned ID and
+`CommandResult` includes `ID`, the probe can correlate results deterministically
+by ID (e.g., keep an `id -> candidate` map when queuing). This avoids O(n)
+scans per confirmation and prevents ambiguity if the same command string is
+queued more than once or the device normalizes command formatting.
 
-- **Severity:** High
-- **Problem:** `SendQueryUsersCommand` queues a `DATA QUERY USERINFO` command
-  and the device responds by pushing user data via `POST /iclock/cdata`. However,
-  the current `HandleCData` implementation only acknowledges these pushes and
-  does not parse, dispatch, or surface the returned user records via any callback.
-  Query results are effectively silently discarded.
-- **Current workaround:** Documentation and docstrings now note this limitation,
-  advising callers to handle `/iclock/cdata` requests themselves.
-- **Planned fix:**
-  - Implement parsing for user-data query result payloads arriving on
-    `/iclock/cdata`.
-  - Expose the returned user records to callers via a new callback
-    (e.g., `WithOnQueryResult` or similar).
-  - If full ingestion is deferred further, narrow the API surface so it does
-    not imply end-to-end support for returning user datasets.
+**Action:** Refactor the probe to maintain an `id -> candidate` map populated
+when `QueueCommand` returns, and look up results by `CommandResult.ID` instead
+of iterating `queued` by string comparison.
+
+## 2. DrainCommands exports unexported type `commandEntry`
+
+**File:** `adms.go:973`
+**Severity:** High (breaking API)
+
+`DrainCommands` is an exported method but returns `[]commandEntry`, where
+`commandEntry` (and its fields) are unexported. This makes the API effectively
+unusable for external callers and is also a breaking type change from `[]string`.
+
+**Action:** Either:
+- Export `commandEntry` (and its fields) as a public type (e.g., `CommandEntry`
+  with `ID int64` and `Command string`), or
+- Keep the public signature as `[]string` and add a separate exported
+  method/type for ID+command pairs.
