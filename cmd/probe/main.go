@@ -198,8 +198,6 @@ func run(ctx context.Context, cfg probeConfig) error {
 			if c, ok := idMap[cr.ID]; ok {
 				cmd = c.cmd
 				desc = c.desc
-			} else if cr.QueuedCommand != "" {
-				cmd = cr.QueuedCommand
 			} else if replied < len(queued) {
 				c := queued[replied]
 				desc = c.desc
