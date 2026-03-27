@@ -171,15 +171,17 @@ type probeConfig struct {
 // run is the core probe logic, extracted from main for testability.
 func run(ctx context.Context, cfg probeConfig) error {
 	// Track results.
-	// Commands are queued FIFO and assigned IDs at write-time, so we
-	// correlate results by maintaining a queue of queued candidates in
-	// order. When a confirmation arrives, the next unmatched candidate
-	// is paired by FIFO index (no command-prefix matching is performed).
+	// Commands are queued FIFO and assigned IDs at queue time. We
+	// correlate results by maintaining an id → candidate map populated
+	// when QueueCommand returns, and look up results by CommandResult.ID
+	// for O(1) deterministic correlation. FIFO order is kept as a
+	// fallback for edge cases where the ID is missing or unknown.
 	var (
 		mu      sync.Mutex
 		results []result
-		queued  []candidate // commands queued in order
-		replied int         // how many confirmations received
+		queued  []candidate             // commands queued in order (for FIFO fallback & summary)
+		idMap   = map[int64]candidate{} // id → candidate for O(1) correlation
+		replied int                     // how many confirmations received
 	)
 
 	opts := []zkadms.Option{
@@ -189,19 +191,15 @@ func run(ctx context.Context, cfg probeConfig) error {
 			mu.Lock()
 			defer mu.Unlock()
 
-			// Use the QueuedCommand field for correlation when available,
-			// falling back to FIFO order.
+			// Correlate by command ID (O(1) map lookup), falling back to
+			// FIFO order when the ID is unknown.
 			desc := "(unknown)"
 			cmd := cr.Command
-			if cr.QueuedCommand != "" {
+			if c, ok := idMap[cr.ID]; ok {
+				cmd = c.cmd
+				desc = c.desc
+			} else if cr.QueuedCommand != "" {
 				cmd = cr.QueuedCommand
-				// Find the matching candidate description.
-				for _, c := range queued {
-					if c.cmd == cmd {
-						desc = c.desc
-						break
-					}
-				}
 			} else if replied < len(queued) {
 				c := queued[replied]
 				desc = c.desc
@@ -297,13 +295,15 @@ func run(ctx context.Context, cfg probeConfig) error {
 				continue
 			}
 
-			if _, err := server.QueueCommand(cfg.sn, c.cmd); err != nil {
+			id, err := server.QueueCommand(cfg.sn, c.cmd)
+			if err != nil {
 				fmt.Printf("  QUEUE ERROR: %s: %v\n", c.cmd, err)
 				continue
 			}
 
 			mu.Lock()
 			queued = append(queued, c)
+			idMap[id] = c
 			queuedCount := len(queued)
 			mu.Unlock()
 			tag := "[SAFE]"
