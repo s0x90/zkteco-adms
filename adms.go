@@ -424,11 +424,13 @@ type CommandResult struct {
 	QueuedCommand string
 }
 
-// commandEntry pairs a pre-assigned command ID with the command string.
+// CommandEntry pairs a pre-assigned command ID with the command string.
 // IDs are assigned at queue time so callers can correlate confirmations.
-type commandEntry struct {
-	id  int64
-	cmd string
+type CommandEntry struct {
+	// ID is the monotonically increasing identifier assigned at queue time.
+	ID int64
+	// Command is the raw command string (e.g. "DATA UPDATE USERINFO PIN=1\tName=John").
+	Command string
 }
 
 // pendingEntry tracks a queued command that has not yet been confirmed by the
@@ -467,7 +469,7 @@ type UserRecord struct {
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
-	commandQueue map[string][]commandEntry // Serial number -> queued commands
+	commandQueue map[string][]CommandEntry // Serial number -> queued commands
 	queueMutex   sync.RWMutex
 
 	// pendingCommands maps command IDs (assigned at queue time) to their
@@ -523,7 +525,7 @@ type ADMSServer struct {
 func NewADMSServer(opts ...Option) *ADMSServer {
 	s := &ADMSServer{
 		devices:                make(map[string]*Device),
-		commandQueue:           make(map[string][]commandEntry),
+		commandQueue:           make(map[string][]CommandEntry),
 		pendingCommands:        make(map[int64]pendingEntry),
 		logger:                 slog.Default(),
 		maxBodySize:            defaultMaxBodySize,
@@ -707,7 +709,7 @@ func (s *ADMSServer) writeCommandsOrOK(w http.ResponseWriter, serialNumber strin
 	w.WriteHeader(http.StatusOK)
 	if len(commands) > 0 {
 		for _, entry := range commands {
-			fmt.Fprintf(w, cmdFormat, entry.id, entry.cmd)
+			fmt.Fprintf(w, cmdFormat, entry.ID, entry.Command)
 		}
 	} else {
 		fmt.Fprint(w, respOK)
@@ -963,14 +965,14 @@ func (s *ADMSServer) QueueCommand(serialNumber, command string) (int64, error) {
 	if s.maxCommandsPerDevice > 0 && len(s.commandQueue[serialNumber]) >= s.maxCommandsPerDevice {
 		return 0, ErrCommandQueueFull
 	}
-	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], commandEntry{id: id, cmd: command})
+	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], CommandEntry{ID: id, Command: command})
 	s.pendingCommands[id] = pendingEntry{sn: serialNumber, cmd: command}
 	return id, nil
 }
 
 // DrainCommands retrieves and removes all pending commands for a device.
 // After this call, the device's command queue is empty.
-func (s *ADMSServer) DrainCommands(serialNumber string) []commandEntry {
+func (s *ADMSServer) DrainCommands(serialNumber string) []CommandEntry {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
