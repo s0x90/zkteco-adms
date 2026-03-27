@@ -189,10 +189,20 @@ func run(ctx context.Context, cfg probeConfig) error {
 			mu.Lock()
 			defer mu.Unlock()
 
-			// Match against queued commands in order.
+			// Use the QueuedCommand field for correlation when available,
+			// falling back to FIFO order.
 			desc := "(unknown)"
 			cmd := cr.Command
-			if replied < len(queued) {
+			if cr.QueuedCommand != "" {
+				cmd = cr.QueuedCommand
+				// Find the matching candidate description.
+				for _, c := range queued {
+					if c.cmd == cmd {
+						desc = c.desc
+						break
+					}
+				}
+			} else if replied < len(queued) {
 				c := queued[replied]
 				desc = c.desc
 				cmd = c.cmd
@@ -287,7 +297,7 @@ func run(ctx context.Context, cfg probeConfig) error {
 				continue
 			}
 
-			if err := server.QueueCommand(cfg.sn, c.cmd); err != nil {
+			if _, err := server.QueueCommand(cfg.sn, c.cmd); err != nil {
 				fmt.Printf("  QUEUE ERROR: %s: %v\n", c.cmd, err)
 				continue
 			}

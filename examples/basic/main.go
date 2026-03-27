@@ -219,7 +219,7 @@ func commandHandler(server *zkadms.ADMSServer) http.Handler {
 			return
 		}
 
-		if err := server.QueueCommand(sn, cmd); err != nil {
+		if _, err := server.QueueCommand(sn, cmd); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}

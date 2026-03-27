@@ -1742,3 +1742,93 @@ func TestRequireDevice_EmptySN(t *testing.T) {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
 }
+
+// ---------- sendOrFail / ignoreID coverage ----------
+
+func TestSendOrFail_GenericError(t *testing.T) {
+	w := httptest.NewRecorder()
+	ok := sendOrFail(w, "DEV001", fmt.Errorf("some internal error"))
+	if ok {
+		t.Error("expected sendOrFail to return false on generic error")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+	var resp apiError
+	decodeResponse(t, w, &resp)
+	if resp.Error != "some internal error" {
+		t.Errorf("expected error message %q, got %q", "some internal error", resp.Error)
+	}
+}
+
+func TestIgnoreID(t *testing.T) {
+	if err := ignoreID(42, nil); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+	want := fmt.Errorf("test error")
+	if err := ignoreID(0, want); err != want {
+		t.Errorf("expected error %v, got %v", want, err)
+	}
+}
+
+// TestRun_ExercisesQueryUsersCallback starts the server via run() and sends
+// simulated USERINFO data to exercise the WithOnQueryUsers callback.
+func TestRun_ExercisesQueryUsersCallback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, addr, []string{"DEV001"})
+	}()
+
+	// Wait for server to start.
+	base := "http://" + addr
+	{
+		client := http.Client{Timeout: 500 * time.Millisecond}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if time.Now().After(deadline) {
+				t.Fatalf("server did not become ready within timeout")
+			}
+			resp, err := client.Get(base + "/api/devices")
+			if err == nil {
+				resp.Body.Close()
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// Send USERINFO data — triggers WithOnQueryUsers callback.
+	userData := "PIN=100\tName=TestUser\tPrivilege=0\tCard=ABC\tPassword=pw\nPIN=200\tName=User2\tPrivilege=14\n"
+	resp, err := http.Post(base+"/iclock/cdata?SN=DEV001&table=USERINFO",
+		"text/plain", strings.NewReader(userData))
+	if err != nil {
+		t.Fatalf("POST USERINFO failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s")
+	}
+}

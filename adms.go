@@ -81,8 +81,9 @@ const (
 	routeInspect    = "/iclock/inspect"
 
 	// Table names sent by devices in the "table" query parameter.
-	tableATTLOG  = "ATTLOG"
-	tableOPERLOG = "OPERLOG"
+	tableATTLOG   = "ATTLOG"
+	tableOPERLOG  = "OPERLOG"
+	tableUSERINFO = "USERINFO"
 
 	// timestampFormat is the date/time layout used by ZKTeco devices.
 	timestampFormat = "2006-01-02 15:04:05"
@@ -275,6 +276,16 @@ func WithOnCommandResult(fn func(ctx context.Context, result CommandResult)) Opt
 	}
 }
 
+// WithOnQueryUsers registers a callback invoked when a device pushes user
+// records in response to a DATA QUERY USERINFO command. The device sends user
+// data via POST /iclock/cdata with table=USERINFO, which is parsed into
+// [UserRecord] values.
+func WithOnQueryUsers(fn func(ctx context.Context, sn string, users []UserRecord)) Option {
+	return func(s *ADMSServer) {
+		s.onQueryUsers = fn
+	}
+}
+
 // WithBaseContext sets the parent context for the server. Callback contexts
 // are derived from this context. If not provided, [context.Background] is used.
 func WithBaseContext(ctx context.Context) Option {
@@ -401,9 +412,47 @@ type CommandResult struct {
 	ID int64
 	// ReturnCode is the device's result code (0 = success).
 	ReturnCode int
-	// Command is the command type echoed back by the device (e.g. "USER ADD"),
+	// Command is the command type echoed back by the device (e.g. "DATA"),
 	// if present in the confirmation body.
 	Command string
+	// QueuedCommand is the original command string that was queued via
+	// [ADMSServer.QueueCommand] (e.g. "DATA UPDATE USERINFO PIN=1\tName=John").
+	// This field enables callers to correlate a device's "CMD=DATA"
+	// confirmation back to the specific operation that triggered it.
+	// It is empty if the command ID is not found in the server's pending map
+	// (e.g. the device echoed an ID that was never assigned by this server).
+	QueuedCommand string
+}
+
+// commandEntry pairs a pre-assigned command ID with the command string.
+// IDs are assigned at queue time so callers can correlate confirmations.
+type commandEntry struct {
+	id  int64
+	cmd string
+}
+
+// pendingEntry tracks a queued command that has not yet been confirmed by the
+// device. It stores the originating serial number so that eviction can remove
+// all entries for a stale device — including commands already drained and sent.
+type pendingEntry struct {
+	sn  string
+	cmd string
+}
+
+// UserRecord represents a user record returned by the device in response to
+// a DATA QUERY USERINFO command. The device pushes user data via
+// POST /iclock/cdata with tab-separated key=value fields.
+type UserRecord struct {
+	// PIN is the user's personal identification number (unique on the device).
+	PIN string
+	// Name is the user's display name.
+	Name string
+	// Privilege is the user's privilege level (0 = normal, 14 = admin).
+	Privilege int
+	// Card is the user's RFID card number, if any.
+	Card string
+	// Password is the user's password, if any.
+	Password string
 }
 
 // ADMSServer manages communication with ZKTeco devices using the ADMS protocol.
@@ -412,18 +461,26 @@ type CommandResult struct {
 // are designed not to block device HTTP responses during normal operation.
 // Under backpressure, dispatch may wait up to dispatchTimeout when the
 // callback queue is full. Use [WithOnAttendance], [WithOnDeviceInfo],
-// [WithOnRegistry], and [WithOnCommandResult] to register callbacks.
+// [WithOnRegistry], [WithOnCommandResult], and [WithOnQueryUsers] to register
+// callbacks.
 // Call Close to drain the callback queue when the server is shutting down.
 type ADMSServer struct {
 	devices      map[string]*Device
 	devicesMutex sync.RWMutex
-	commandQueue map[string][]string // Serial number -> commands queue
+	commandQueue map[string][]commandEntry // Serial number -> queued commands
 	queueMutex   sync.RWMutex
+
+	// pendingCommands maps command IDs (assigned at queue time) to their
+	// original command strings and originating device serial numbers.
+	// Entries are added by QueueCommand and consumed by HandleDeviceCmd
+	// when the device confirms execution.
+	pendingCommands map[int64]pendingEntry
 
 	onAttendance    func(ctx context.Context, record AttendanceRecord)
 	onDeviceInfo    func(ctx context.Context, sn string, info map[string]string)
 	onRegistry      func(ctx context.Context, sn string, info map[string]string)
 	onCommandResult func(ctx context.Context, result CommandResult)
+	onQueryUsers    func(ctx context.Context, sn string, users []UserRecord)
 
 	logger *slog.Logger
 
@@ -466,7 +523,8 @@ type ADMSServer struct {
 func NewADMSServer(opts ...Option) *ADMSServer {
 	s := &ADMSServer{
 		devices:                make(map[string]*Device),
-		commandQueue:           make(map[string][]string),
+		commandQueue:           make(map[string][]commandEntry),
+		pendingCommands:        make(map[int64]pendingEntry),
 		logger:                 slog.Default(),
 		maxBodySize:            defaultMaxBodySize,
 		maxDevices:             defaultMaxDevices,
@@ -576,10 +634,19 @@ func (s *ADMSServer) evictStaleDevices() {
 		return
 	}
 
-	// Phase 2: clean command queues under queueMutex.
+	// Phase 2: clean command queues and pending command mappings under queueMutex.
 	s.queueMutex.Lock()
+	staleSet := make(map[string]struct{}, len(stale))
 	for _, sn := range stale {
+		staleSet[sn] = struct{}{}
 		delete(s.commandQueue, sn)
+	}
+	// Remove all pending commands for evicted devices, including commands
+	// that were already drained and sent but never confirmed.
+	for id, entry := range s.pendingCommands {
+		if _, ok := staleSet[entry.sn]; ok {
+			delete(s.pendingCommands, id)
+		}
 	}
 	s.queueMutex.Unlock()
 
@@ -632,16 +699,15 @@ func (s *ADMSServer) requireDevice(w http.ResponseWriter, r *http.Request) (stri
 }
 
 // writeCommandsOrOK drains pending commands for a device and writes them as
-// "C:<id>:<cmd>\n" lines with monotonically increasing IDs. The device uses
+// "C:<id>:<cmd>\n" lines using the IDs assigned at queue time. The device uses
 // the ID to confirm execution via /iclock/devicecmd.
 // If no commands are pending, it writes "OK".
 func (s *ADMSServer) writeCommandsOrOK(w http.ResponseWriter, serialNumber string) {
 	commands := s.DrainCommands(serialNumber)
 	w.WriteHeader(http.StatusOK)
 	if len(commands) > 0 {
-		for _, cmd := range commands {
-			id := s.cmdID.Add(1)
-			fmt.Fprintf(w, cmdFormat, id, cmd)
+		for _, entry := range commands {
+			fmt.Fprintf(w, cmdFormat, entry.id, entry.cmd)
 		}
 	} else {
 		fmt.Fprint(w, respOK)
@@ -762,6 +828,24 @@ func (s *ADMSServer) dispatchCommandResult(result CommandResult) bool {
 	})
 }
 
+// dispatchQueryUsers dispatches parsed user records to the configured callback.
+func (s *ADMSServer) dispatchQueryUsers(sn string, users []UserRecord) bool {
+	if len(users) == 0 {
+		return true
+	}
+	cb := s.onQueryUsers
+	if cb == nil {
+		return true
+	}
+	ctx := s.baseCtx
+	batch := users // capture for closure
+	return s.dispatchCallback(func() {
+		s.safeCall(func() {
+			cb(ctx, sn, batch)
+		})
+	})
+}
+
 // bodyPreview returns a truncated preview of body for logging (max maxBodyPreviewLen bytes).
 func bodyPreview(body []byte) string {
 	if len(body) > maxBodyPreviewLen {
@@ -866,22 +950,27 @@ func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 }
 
 // QueueCommand adds a command to be sent to the device on its next poll.
-// It returns [ErrCommandQueueFull] if the per-device limit configured via
-// [WithMaxCommandsPerDevice] has been reached.
-func (s *ADMSServer) QueueCommand(serialNumber, command string) error {
+// It assigns a monotonically increasing command ID at queue time and returns
+// the ID so callers can correlate the command with its [CommandResult].
+// It returns [ErrCommandQueueFull] (with ID 0) if the per-device limit
+// configured via [WithMaxCommandsPerDevice] has been reached.
+func (s *ADMSServer) QueueCommand(serialNumber, command string) (int64, error) {
+	id := s.cmdID.Add(1)
+
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
 	if s.maxCommandsPerDevice > 0 && len(s.commandQueue[serialNumber]) >= s.maxCommandsPerDevice {
-		return ErrCommandQueueFull
+		return 0, ErrCommandQueueFull
 	}
-	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], command)
-	return nil
+	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], commandEntry{id: id, cmd: command})
+	s.pendingCommands[id] = pendingEntry{sn: serialNumber, cmd: command}
+	return id, nil
 }
 
 // DrainCommands retrieves and removes all pending commands for a device.
 // After this call, the device's command queue is empty.
-func (s *ADMSServer) DrainCommands(serialNumber string) []string {
+func (s *ADMSServer) DrainCommands(serialNumber string) []commandEntry {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
@@ -944,6 +1033,26 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 
 	case tableOPERLOG:
 		// Operation log - acknowledge
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, respOK)
+
+	case tableUSERINFO:
+		// User records pushed in response to DATA QUERY USERINFO.
+		body, err := s.readBody(w, r)
+		if err != nil {
+			return
+		}
+
+		if len(body) > 0 {
+			users := s.parseUserRecords(string(body), serialNumber)
+			s.logger.Debug("USERINFO records processed",
+				"count", len(users), "device", serialNumber)
+			if !s.dispatchQueryUsers(serialNumber, users) {
+				s.logger.Warn("callback queue full, user records dropped",
+					"count", len(users), "device", serialNumber)
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, respOK)
 
@@ -1019,11 +1128,23 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	results := s.parseCommandResults(string(body), serialNumber)
 
 	for _, result := range results {
+		// Populate QueuedCommand from the pending commands map.
+		s.queueMutex.Lock()
+		if entry, ok := s.pendingCommands[result.ID]; ok {
+			result.QueuedCommand = entry.cmd
+			delete(s.pendingCommands, result.ID)
+		}
+		s.queueMutex.Unlock()
+
 		s.logger.Info("command result",
 			"device", serialNumber,
 			"id", result.ID,
 			"return", result.ReturnCode,
 			"cmd", result.Command)
+		s.logger.Debug("command result detail",
+			"device", serialNumber,
+			"id", result.ID,
+			"queued_cmd", result.QueuedCommand)
 
 		if !s.dispatchCommandResult(result) {
 			s.logger.Warn("callback queue full, command result dropped",
@@ -1230,6 +1351,49 @@ func (s *ADMSServer) parseKVPairs(data, sep string, transformKey func(string) st
 	return info
 }
 
+// parseUserRecords parses tab-separated USERINFO lines pushed by a device in
+// response to a DATA QUERY USERINFO command. Each line has the form:
+//
+//	PIN=1\tName=John\tPrivilege=0\tCard=\tPassword=
+//
+// Lines that lack a PIN field are skipped with a warning.
+func (s *ADMSServer) parseUserRecords(data, serialNumber string) []UserRecord {
+	var records []UserRecord
+	var skipped int
+	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		fields := make(map[string]string)
+		for part := range strings.SplitSeq(line, "\t") {
+			if key, value, ok := strings.Cut(part, "="); ok {
+				fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+			}
+		}
+		pin := fields["PIN"]
+		if pin == "" {
+			skipped++
+			s.logger.Warn("skipping USERINFO line without PIN",
+				"device", serialNumber, "line_len", len(line))
+			continue
+		}
+		privilege, _ := strconv.Atoi(fields["Privilege"])
+		records = append(records, UserRecord{
+			PIN:       pin,
+			Name:      fields["Name"],
+			Privilege: privilege,
+			Card:      fields["Card"],
+			Password:  fields["Password"],
+		})
+	}
+	if skipped > 0 {
+		s.logger.Warn("skipped malformed USERINFO lines",
+			"device", serialNumber, "skipped", skipped, "total", len(records)+skipped)
+	}
+	return records
+}
+
 // ServeHTTP implements http.Handler interface for convenient routing.
 func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -1254,8 +1418,9 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // SendInfoCommand queues an INFO command to request device information.
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendInfoCommand(serialNumber string) (int64, error) {
 	return s.QueueCommand(serialNumber, "INFO")
 }
 
@@ -1270,8 +1435,9 @@ func (s *ADMSServer) SendInfoCommand(serialNumber string) error {
 // (e.g. ZAM180-NF firmware) require the DATA UPDATE USERINFO prefix instead.
 // The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) (int64, error) {
 	cmd := fmt.Sprintf("DATA UPDATE USERINFO PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1285,8 +1451,9 @@ func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privileg
 // (e.g. ZAM180-NF firmware) require the DATA DELETE USERINFO prefix instead.
 // The device confirms execution by POSTing to /iclock/devicecmd with CMD=DATA.
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) (int64, error) {
 	cmd := fmt.Sprintf("DATA DELETE USERINFO PIN=%s", pin)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1295,8 +1462,9 @@ func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) error {
 // responsiveness. The device confirms by POSTing to /iclock/devicecmd
 // with CMD=CHECK and Return=0.
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendCheckCommand(serialNumber string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendCheckCommand(serialNumber string) (int64, error) {
 	return s.QueueCommand(serialNumber, "CHECK")
 }
 
@@ -1312,8 +1480,9 @@ func (s *ADMSServer) SendCheckCommand(serialNumber string) error {
 // The option value is typically delivered via the device info push
 // (POST /iclock/cdata) rather than in the command confirmation body.
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) (int64, error) {
 	cmd := fmt.Sprintf("GET OPTION FROM %s", key)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1330,30 +1499,27 @@ func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) error {
 //	server.SendShellCommand("SERIAL001", "date")
 //	// Device responds: ID=1&Return=0&CMD=Shell\nContent=Tue Mar 24 16:12:26 GMT 2026
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendShellCommand(serialNumber, command string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendShellCommand(serialNumber, command string) (int64, error) {
 	cmd := fmt.Sprintf("Shell %s", command)
 	return s.QueueCommand(serialNumber, cmd)
 }
 
 // SendQueryUsersCommand queues a DATA QUERY USERINFO command to request
-// all user records from the device. According to the device protocol, the
-// device responds by pushing user data via POST /iclock/cdata (not via the
-// command confirmation endpoint).
-//
-// NOTE: This library currently only acknowledges such /iclock/cdata pushes
-// and does not parse, dispatch, or surface the returned user records via any
-// callback. Only the command confirmation is processed, which the device
-// sends by POSTing to /iclock/devicecmd with CMD=DATA and Return=0.
-// If you need to consume the actual query results, you must handle and parse
-// the /iclock/cdata requests yourself.
+// all user records from the device. The device responds by pushing user data
+// via POST /iclock/cdata with table=USERINFO, which is parsed into
+// [UserRecord] values and dispatched via the [WithOnQueryUsers] callback.
+// The device also sends a command confirmation by POSTing to /iclock/devicecmd
+// with CMD=DATA and Return=0.
 //
 // To query a specific user by PIN, use [ADMSServer.QueueCommand] directly:
 //
 //	server.QueueCommand(serialNumber, "DATA QUERY USERINFO PIN=1")
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) (int64, error) {
 	return s.QueueCommand(serialNumber, "DATA QUERY USERINFO")
 }
 
@@ -1361,8 +1527,9 @@ func (s *ADMSServer) SendQueryUsersCommand(serialNumber string) error {
 // The device confirms by POSTing to /iclock/devicecmd with CMD=LOG
 // and Return=0.
 //
-// It returns an error if the command queue is full (see [WithMaxCommandsPerDevice]).
-func (s *ADMSServer) SendLogCommand(serialNumber string) error {
+// It returns the assigned command ID and an error if the command queue is full
+// (see [WithMaxCommandsPerDevice]).
+func (s *ADMSServer) SendLogCommand(serialNumber string) (int64, error) {
 	return s.QueueCommand(serialNumber, "LOG")
 }
 
