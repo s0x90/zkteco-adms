@@ -303,7 +303,8 @@ func requireDevice(w http.ResponseWriter, r *http.Request, server *zkadms.ADMSSe
 
 // queueOrFail queues a command and writes a JSON error on failure.
 func queueOrFail(w http.ResponseWriter, server *zkadms.ADMSServer, sn, cmd string) bool {
-	return sendOrFail(w, sn, server.QueueCommand(sn, cmd))
+	_, err := server.QueueCommand(sn, cmd)
+	return sendOrFail(w, sn, err)
 }
 
 // sendOrFail checks err from a Send*/QueueCommand call and writes a JSON
@@ -320,6 +321,10 @@ func sendOrFail(w http.ResponseWriter, sn string, err error) bool {
 	}
 	return true
 }
+
+// ignoreID discards the command ID from a (int64, error) return pair,
+// returning just the error for use with sendOrFail.
+func ignoreID(_ int64, err error) error { return err }
 
 // ---------- command handlers ----------
 
@@ -344,7 +349,7 @@ func handleInfo(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if !sendOrFail(w, sn, server.SendInfoCommand(sn)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendInfoCommand(sn))) {
 			return
 		}
 		writeCommandOK(w, sn, "INFO")
@@ -412,7 +417,7 @@ func handleAddUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		if !sendOrFail(w, sn, server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendUserAddCommand(sn, req.PIN, req.Name, req.Privilege, req.Card))) {
 			return
 		}
 		writeCommandOK(w, sn, "DATA UPDATE USERINFO")
@@ -435,7 +440,7 @@ func handleDeleteUser(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "pin is required")
 			return
 		}
-		if !sendOrFail(w, sn, server.SendUserDeleteCommand(sn, req.PIN)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendUserDeleteCommand(sn, req.PIN))) {
 			return
 		}
 		writeCommandOK(w, sn, "DATA DELETE USERINFO")
@@ -463,7 +468,7 @@ func handleCheck(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if !sendOrFail(w, sn, server.SendCheckCommand(sn)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendCheckCommand(sn))) {
 			return
 		}
 		writeCommandOK(w, sn, "CHECK")
@@ -487,7 +492,7 @@ func handleGetOption(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "key is required")
 			return
 		}
-		if !sendOrFail(w, sn, server.SendGetOptionCommand(sn, req.Key)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendGetOptionCommand(sn, req.Key))) {
 			return
 		}
 		writeCommandOK(w, sn, "GET OPTION FROM "+req.Key)
@@ -513,7 +518,7 @@ func handleShell(server *zkadms.ADMSServer) http.Handler {
 			writeError(w, http.StatusBadRequest, "command is required")
 			return
 		}
-		if !sendOrFail(w, sn, server.SendShellCommand(sn, req.Command)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendShellCommand(sn, req.Command))) {
 			return
 		}
 		writeCommandOK(w, sn, "Shell "+req.Command)
@@ -528,7 +533,7 @@ func handleQueryUsers(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if !sendOrFail(w, sn, server.SendQueryUsersCommand(sn)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendQueryUsersCommand(sn))) {
 			return
 		}
 		writeCommandOK(w, sn, "DATA QUERY USERINFO")
@@ -542,7 +547,7 @@ func handleLog(server *zkadms.ADMSServer) http.Handler {
 		if !ok {
 			return
 		}
-		if !sendOrFail(w, sn, server.SendLogCommand(sn)) {
+		if !sendOrFail(w, sn, ignoreID(server.SendLogCommand(sn))) {
 			return
 		}
 		writeCommandOK(w, sn, "LOG")
@@ -685,8 +690,17 @@ func run(ctx context.Context, addr string, devices []string) error {
 			if result.ReturnCode != 0 {
 				status = fmt.Sprintf("FAIL (code %d)", result.ReturnCode)
 			}
-			fmt.Printf("Command result: device=%s id=%d cmd=%q status=%s\n",
-				result.SerialNumber, result.ID, result.Command, status)
+			fmt.Printf("Command result: device=%s id=%d cmd=%q queued=%q status=%s\n",
+				result.SerialNumber, result.ID, result.Command, result.QueuedCommand, status)
+		}),
+
+		// Log user records received from DATA QUERY USERINFO.
+		zkadms.WithOnQueryUsers(func(_ context.Context, sn string, users []zkadms.UserRecord) {
+			fmt.Printf("Query users result: device=%s count=%d\n", sn, len(users))
+			for i, u := range users {
+				fmt.Printf("  [%d] PIN=%s Name=%q Privilege=%d Card=%q Password=%q\n",
+					i, u.PIN, u.Name, u.Privilege, u.Card, u.Password)
+			}
 		}),
 	)
 	defer server.Close()
