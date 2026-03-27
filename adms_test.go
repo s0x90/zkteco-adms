@@ -4302,3 +4302,86 @@ func TestSendQueryUsersCommand_ReturnsID(t *testing.T) {
 		t.Errorf("expected drained command ID %d to match returned ID %d", commands[0].id, id)
 	}
 }
+
+func TestDispatchQueryUsers_EmptySlice(t *testing.T) {
+	called := make(chan struct{}, 1)
+	server := NewADMSServer(
+		WithOnQueryUsers(func(_ context.Context, _ string, _ []UserRecord) {
+			called <- struct{}{}
+		}),
+	)
+	defer server.Close()
+
+	// dispatchQueryUsers with empty slice should return true without calling the callback.
+	if !server.dispatchQueryUsers("DEV001", nil) {
+		t.Error("expected dispatchQueryUsers to return true for nil users")
+	}
+	if !server.dispatchQueryUsers("DEV001", []UserRecord{}) {
+		t.Error("expected dispatchQueryUsers to return true for empty users")
+	}
+
+	select {
+	case <-called:
+		t.Error("callback should NOT be called for empty users")
+	case <-time.After(100 * time.Millisecond):
+		// expected
+	}
+}
+
+func TestHandleCData_USERINFO_BodyTooLarge(t *testing.T) {
+	server := NewADMSServer(WithMaxBodySize(10))
+	defer server.Close()
+
+	body := strings.Repeat("x", 100)
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=USERINFO", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", w.Code)
+	}
+}
+
+func TestHandleCData_USERINFO_CallbackQueueFull(t *testing.T) {
+	blocker := make(chan struct{})
+	server := NewADMSServer(
+		WithCallbackBufferSize(1),
+		WithDispatchTimeout(10*time.Millisecond),
+		WithOnQueryUsers(func(_ context.Context, _ string, _ []UserRecord) {
+			<-blocker
+		}),
+	)
+	defer func() {
+		close(blocker)
+		server.Close()
+	}()
+
+	userData := "PIN=1\tName=Alice\n"
+
+	// Fill the callback channel.
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=USERINFO", strings.NewReader(userData))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	time.Sleep(50 * time.Millisecond) // let worker pick up and block
+
+	// Fill remaining channel capacity.
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=USERINFO", strings.NewReader(userData))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	// Now queue should be full — dispatch will fail but handler still returns 200.
+	req3 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=USERINFO", strings.NewReader(userData))
+	w3 := httptest.NewRecorder()
+	server.HandleCData(w3, req3)
+
+	// USERINFO handler always returns 200 OK even when callback queue is full
+	// (it logs a warning instead of returning 503).
+	if w3.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w3.Code)
+	}
+}
