@@ -4121,6 +4121,66 @@ func TestPendingCommands_CleanupOnEviction(t *testing.T) {
 	}
 }
 
+func TestPendingCommands_CleanupOnEviction_Drained(t *testing.T) {
+	server := NewADMSServer(
+		WithDeviceEvictionInterval(50*time.Millisecond),
+		WithDeviceEvictionTimeout(100*time.Millisecond),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("EVICT02"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Queue commands to populate pendingCommands.
+	id1, err := server.QueueCommand("EVICT02", "CMD_X")
+	if err != nil {
+		t.Fatalf("QueueCommand X failed: %v", err)
+	}
+	id2, err := server.QueueCommand("EVICT02", "CMD_Y")
+	if err != nil {
+		t.Fatalf("QueueCommand Y failed: %v", err)
+	}
+
+	// Drain commands — simulates the device fetching them via /iclock/devicecmd.
+	// This removes them from commandQueue but leaves them in pendingCommands.
+	drained := server.DrainCommands("EVICT02")
+	if len(drained) != 2 {
+		t.Fatalf("expected 2 drained commands, got %d", len(drained))
+	}
+
+	// Verify entries still exist in pendingCommands after drain.
+	server.queueMutex.Lock()
+	_, ok1 := server.pendingCommands[id1]
+	_, ok2 := server.pendingCommands[id2]
+	server.queueMutex.Unlock()
+	if !ok1 || !ok2 {
+		t.Fatal("expected pending commands to survive drain")
+	}
+
+	// Backdate last activity so eviction picks it up.
+	server.devicesMutex.Lock()
+	server.devices["EVICT02"].LastActivity = time.Now().Add(-time.Hour)
+	server.devicesMutex.Unlock()
+
+	// Wait for eviction cycle.
+	time.Sleep(250 * time.Millisecond)
+
+	if d := server.GetDevice("EVICT02"); d != nil {
+		t.Error("expected device to be evicted")
+	}
+
+	// Verify pendingCommands entries were cleaned up even though commands
+	// had already been drained from the queue before eviction.
+	server.queueMutex.Lock()
+	_, still1 := server.pendingCommands[id1]
+	_, still2 := server.pendingCommands[id2]
+	server.queueMutex.Unlock()
+	if still1 || still2 {
+		t.Error("expected drained pending commands to be cleaned up after eviction")
+	}
+}
+
 func TestParseUserRecords(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()

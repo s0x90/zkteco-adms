@@ -431,6 +431,14 @@ type commandEntry struct {
 	cmd string
 }
 
+// pendingEntry tracks a queued command that has not yet been confirmed by the
+// device. It stores the originating serial number so that eviction can remove
+// all entries for a stale device — including commands already drained and sent.
+type pendingEntry struct {
+	sn  string
+	cmd string
+}
+
 // UserRecord represents a user record returned by the device in response to
 // a DATA QUERY USERINFO command. The device pushes user data via
 // POST /iclock/cdata with tab-separated key=value fields.
@@ -463,9 +471,10 @@ type ADMSServer struct {
 	queueMutex   sync.RWMutex
 
 	// pendingCommands maps command IDs (assigned at queue time) to their
-	// original command strings. Entries are added by QueueCommand and
-	// consumed by HandleDeviceCmd when the device confirms execution.
-	pendingCommands map[int64]string
+	// original command strings and originating device serial numbers.
+	// Entries are added by QueueCommand and consumed by HandleDeviceCmd
+	// when the device confirms execution.
+	pendingCommands map[int64]pendingEntry
 
 	onAttendance    func(ctx context.Context, record AttendanceRecord)
 	onDeviceInfo    func(ctx context.Context, sn string, info map[string]string)
@@ -515,7 +524,7 @@ func NewADMSServer(opts ...Option) *ADMSServer {
 	s := &ADMSServer{
 		devices:                make(map[string]*Device),
 		commandQueue:           make(map[string][]commandEntry),
-		pendingCommands:        make(map[int64]string),
+		pendingCommands:        make(map[int64]pendingEntry),
 		logger:                 slog.Default(),
 		maxBodySize:            defaultMaxBodySize,
 		maxDevices:             defaultMaxDevices,
@@ -627,11 +636,17 @@ func (s *ADMSServer) evictStaleDevices() {
 
 	// Phase 2: clean command queues and pending command mappings under queueMutex.
 	s.queueMutex.Lock()
+	staleSet := make(map[string]struct{}, len(stale))
 	for _, sn := range stale {
-		for _, entry := range s.commandQueue[sn] {
-			delete(s.pendingCommands, entry.id)
-		}
+		staleSet[sn] = struct{}{}
 		delete(s.commandQueue, sn)
+	}
+	// Remove all pending commands for evicted devices, including commands
+	// that were already drained and sent but never confirmed.
+	for id, entry := range s.pendingCommands {
+		if _, ok := staleSet[entry.sn]; ok {
+			delete(s.pendingCommands, id)
+		}
 	}
 	s.queueMutex.Unlock()
 
@@ -949,7 +964,7 @@ func (s *ADMSServer) QueueCommand(serialNumber, command string) (int64, error) {
 		return 0, ErrCommandQueueFull
 	}
 	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], commandEntry{id: id, cmd: command})
-	s.pendingCommands[id] = command
+	s.pendingCommands[id] = pendingEntry{sn: serialNumber, cmd: command}
 	return id, nil
 }
 
@@ -1029,8 +1044,9 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(body) > 0 {
-			s.logger.Debug("USERINFO body", "preview", bodyPreview(body))
 			users := s.parseUserRecords(string(body), serialNumber)
+			s.logger.Debug("USERINFO records processed",
+				"count", len(users), "device", serialNumber)
 			if !s.dispatchQueryUsers(serialNumber, users) {
 				s.logger.Warn("callback queue full, user records dropped",
 					"count", len(users), "device", serialNumber)
@@ -1114,8 +1130,8 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 	for _, result := range results {
 		// Populate QueuedCommand from the pending commands map.
 		s.queueMutex.Lock()
-		if cmd, ok := s.pendingCommands[result.ID]; ok {
-			result.QueuedCommand = cmd
+		if entry, ok := s.pendingCommands[result.ID]; ok {
+			result.QueuedCommand = entry.cmd
 			delete(s.pendingCommands, result.ID)
 		}
 		s.queueMutex.Unlock()
@@ -1124,7 +1140,10 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 			"device", serialNumber,
 			"id", result.ID,
 			"return", result.ReturnCode,
-			"cmd", result.Command,
+			"cmd", result.Command)
+		s.logger.Debug("command result detail",
+			"device", serialNumber,
+			"id", result.ID,
 			"queued_cmd", result.QueuedCommand)
 
 		if !s.dispatchCommandResult(result) {
@@ -1356,7 +1375,7 @@ func (s *ADMSServer) parseUserRecords(data, serialNumber string) []UserRecord {
 		if pin == "" {
 			skipped++
 			s.logger.Warn("skipping USERINFO line without PIN",
-				"device", serialNumber, "line", line)
+				"device", serialNumber, "line_len", len(line))
 			continue
 		}
 		privilege, _ := strconv.Atoi(fields["Privilege"])
