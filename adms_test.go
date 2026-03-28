@@ -119,11 +119,11 @@ func TestQueueAndGetCommands(t *testing.T) {
 	if len(commands) != 2 {
 		t.Errorf("Expected 2 commands, got %d", len(commands))
 	}
-	if commands[0].cmd != "INFO" {
-		t.Errorf("Expected first command to be INFO, got %s", commands[0].cmd)
+	if commands[0].Command != "INFO" {
+		t.Errorf("Expected first command to be INFO, got %s", commands[0].Command)
 	}
-	if commands[1].cmd != "DATA UPDATE USERINFO PIN=1001\tName=Test\tPrivilege=0\tCard=" {
-		t.Errorf("Expected second command to be DATA UPDATE USERINFO, got %s", commands[1].cmd)
+	if commands[1].Command != "DATA UPDATE USERINFO PIN=1001\tName=Test\tPrivilege=0\tCard=" {
+		t.Errorf("Expected second command to be DATA UPDATE USERINFO, got %s", commands[1].Command)
 	}
 
 	// Queue should be cleared after retrieval
@@ -737,8 +737,8 @@ func TestQueueCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
-	if commands[0].cmd != "INFO" {
-		t.Errorf("Expected INFO command, got %s", commands[0].cmd)
+	if commands[0].Command != "INFO" {
+		t.Errorf("Expected INFO command, got %s", commands[0].Command)
 	}
 }
 
@@ -756,8 +756,8 @@ func TestSendUserAddCommand(t *testing.T) {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
 	want := "DATA UPDATE USERINFO PIN=1001\tName=John Doe\tPrivilege=0\tCard=12345678"
-	if commands[0].cmd != want {
-		t.Errorf("Expected command %q, got %q", want, commands[0].cmd)
+	if commands[0].Command != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0].Command)
 	}
 }
 
@@ -775,8 +775,8 @@ func TestSendUserDeleteCommand(t *testing.T) {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
 	want := "DATA DELETE USERINFO PIN=1001"
-	if commands[0].cmd != want {
-		t.Errorf("Expected command %q, got %q", want, commands[0].cmd)
+	if commands[0].Command != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0].Command)
 	}
 }
 
@@ -793,8 +793,8 @@ func TestSendInfoCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Errorf("Expected 1 command, got %d", len(commands))
 	}
-	if commands[0].cmd != "INFO" {
-		t.Errorf("Expected INFO command, got %s", commands[0].cmd)
+	if commands[0].Command != "INFO" {
+		t.Errorf("Expected INFO command, got %s", commands[0].Command)
 	}
 }
 
@@ -810,8 +810,8 @@ func TestSendCheckCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("Expected 1 command, got %d", len(commands))
 	}
-	if commands[0].cmd != "CHECK" {
-		t.Errorf("Expected CHECK command, got %s", commands[0].cmd)
+	if commands[0].Command != "CHECK" {
+		t.Errorf("Expected CHECK command, got %s", commands[0].Command)
 	}
 }
 
@@ -828,8 +828,8 @@ func TestSendGetOptionCommand(t *testing.T) {
 		t.Fatalf("Expected 1 command, got %d", len(commands))
 	}
 	want := "GET OPTION FROM DeviceName"
-	if commands[0].cmd != want {
-		t.Errorf("Expected command %q, got %q", want, commands[0].cmd)
+	if commands[0].Command != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0].Command)
 	}
 }
 
@@ -846,8 +846,8 @@ func TestSendShellCommand(t *testing.T) {
 		t.Fatalf("Expected 1 command, got %d", len(commands))
 	}
 	want := "Shell date"
-	if commands[0].cmd != want {
-		t.Errorf("Expected command %q, got %q", want, commands[0].cmd)
+	if commands[0].Command != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0].Command)
 	}
 }
 
@@ -864,8 +864,8 @@ func TestSendQueryUsersCommand(t *testing.T) {
 		t.Fatalf("Expected 1 command, got %d", len(commands))
 	}
 	want := "DATA QUERY USERINFO"
-	if commands[0].cmd != want {
-		t.Errorf("Expected command %q, got %q", want, commands[0].cmd)
+	if commands[0].Command != want {
+		t.Errorf("Expected command %q, got %q", want, commands[0].Command)
 	}
 }
 
@@ -881,8 +881,8 @@ func TestSendLogCommand(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("Expected 1 command, got %d", len(commands))
 	}
-	if commands[0].cmd != "LOG" {
-		t.Errorf("Expected LOG command, got %s", commands[0].cmd)
+	if commands[0].Command != "LOG" {
+		t.Errorf("Expected LOG command, got %s", commands[0].Command)
 	}
 }
 
@@ -1686,7 +1686,7 @@ func TestDrainCommands(t *testing.T) {
 	if len(commands) != 2 {
 		t.Fatalf("expected 2 commands, got %d", len(commands))
 	}
-	if commands[0].cmd != "CMD1" || commands[1].cmd != "CMD2" {
+	if commands[0].Command != "CMD1" || commands[1].Command != "CMD2" {
 		t.Errorf("unexpected commands: %v", commands)
 	}
 
@@ -4355,11 +4355,11 @@ func TestSendQueryUsersCommand_ReturnsID(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("expected 1 command, got %d", len(commands))
 	}
-	if commands[0].cmd != "DATA QUERY USERINFO" {
-		t.Errorf("expected %q, got %q", "DATA QUERY USERINFO", commands[0].cmd)
+	if commands[0].Command != "DATA QUERY USERINFO" {
+		t.Errorf("expected %q, got %q", "DATA QUERY USERINFO", commands[0].Command)
 	}
-	if commands[0].id != id {
-		t.Errorf("expected drained command ID %d to match returned ID %d", commands[0].id, id)
+	if commands[0].ID != id {
+		t.Errorf("expected drained command ID %d to match returned ID %d", commands[0].ID, id)
 	}
 }
 

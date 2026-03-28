@@ -301,7 +301,22 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// 2. Send command result (Return=0) — triggers WithOnCommandResult OK path.
+	// Give the probe goroutine time to queue candidates so the FIFO
+	// fallback has entries available when the unknown-ID result arrives.
+	time.Sleep(200 * time.Millisecond)
+
+	// 2. Send command result with unknown ID — triggers FIFO fallback path
+	// (ID not in idMap, QueuedCommand empty because ID not in pendingCommands).
+	// Sent first so replied=0 < len(queued), exercising the FIFO branch.
+	cmdResultUnknown := "ID=99999&Return=0&CMD=UNKNOWN"
+	resp, err = http.Post(base+"/iclock/devicecmd?SN=PROBEDEV",
+		"text/plain", strings.NewReader(cmdResultUnknown))
+	if err != nil {
+		t.Fatalf("POST devicecmd (unknown ID) failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// 3. Send command result (Return=0) — triggers WithOnCommandResult OK path.
 	cmdResult := "ID=1&Return=0&CMD=INFO"
 	resp, err = http.Post(base+"/iclock/devicecmd?SN=PROBEDEV",
 		"text/plain", strings.NewReader(cmdResult))
@@ -310,7 +325,7 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// 3. Send command result (Return=-1002) — triggers WithOnCommandResult FAIL path.
+	// 4. Send command result (Return=-1002) — triggers WithOnCommandResult FAIL path.
 	cmdResultFail := "ID=2&Return=-1002&CMD=BAD"
 	resp, err = http.Post(base+"/iclock/devicecmd?SN=PROBEDEV",
 		"text/plain", strings.NewReader(cmdResultFail))
