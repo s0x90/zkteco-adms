@@ -695,7 +695,7 @@ func TestParseAttendanceRecords(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			records := server.parseAttendanceRecords(tc.data, "TEST001")
+			records := server.parseAttendanceRecords(tc.data, "TEST001", time.UTC)
 			if len(records) != tc.expected {
 				t.Errorf("Expected %d records, got %d", tc.expected, len(records))
 			}
@@ -1121,7 +1121,7 @@ func BenchmarkParseAttendanceRecords(b *testing.B) {
 	data := "123\t2024-01-01 08:00:00\t0\t1\t0\n456\t2024-01-01 17:00:00\t1\t1\t0\n789\t2024-01-01 12:00:00\t2\t1\t0"
 
 	for b.Loop() {
-		server.parseAttendanceRecords(data, "TEST001")
+		server.parseAttendanceRecords(data, "TEST001", time.UTC)
 	}
 }
 
@@ -4443,5 +4443,571 @@ func TestHandleCData_USERINFO_CallbackQueueFull(t *testing.T) {
 	// (it logs a warning instead of returning 503).
 	if w3.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w3.Code)
+	}
+}
+
+// --- Timezone Tests ---
+
+func TestRegisterDevice_WithTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	dev := server.GetDevice("DEV001")
+	if dev == nil {
+		t.Fatal("device should be registered")
+	}
+	if dev.Timezone == nil {
+		t.Fatal("expected device timezone to be set")
+	}
+	if dev.Timezone.String() != "Europe/Istanbul" {
+		t.Errorf("expected Europe/Istanbul, got %s", dev.Timezone.String())
+	}
+}
+
+func TestRegisterDevice_WithoutTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	dev := server.GetDevice("DEV001")
+	if dev.Timezone != nil {
+		t.Errorf("expected nil timezone, got %s", dev.Timezone.String())
+	}
+}
+
+func TestRegisterDevice_ReRegistration_AppliesOpts(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+	dev := server.GetDevice("DEV001")
+	if dev.Timezone != nil {
+		t.Errorf("expected nil timezone initially, got %v", dev.Timezone)
+	}
+
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(berlin)); err != nil {
+		t.Fatalf("re-RegisterDevice failed: %v", err)
+	}
+	dev = server.GetDevice("DEV001")
+	if dev.Timezone == nil || dev.Timezone.String() != "Europe/Berlin" {
+		t.Errorf("expected Europe/Berlin after re-registration, got %v", dev.Timezone)
+	}
+}
+
+func TestSetDeviceTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.SetDeviceTimezone("DEV001", tokyo); err != nil {
+		t.Fatalf("SetDeviceTimezone failed: %v", err)
+	}
+
+	dev := server.GetDevice("DEV001")
+	if dev.Timezone == nil || dev.Timezone.String() != "Asia/Tokyo" {
+		t.Errorf("expected Asia/Tokyo, got %v", dev.Timezone)
+	}
+}
+
+func TestSetDeviceTimezone_ClearWithNil(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(tokyo)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	if err := server.SetDeviceTimezone("DEV001", nil); err != nil {
+		t.Fatalf("SetDeviceTimezone(nil) failed: %v", err)
+	}
+	dev := server.GetDevice("DEV001")
+	if dev.Timezone != nil {
+		t.Errorf("expected nil timezone after clearing, got %v", dev.Timezone)
+	}
+}
+
+func TestSetDeviceTimezone_UnknownDevice(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	err := server.SetDeviceTimezone("NOSUCH", time.UTC)
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Errorf("expected ErrDeviceNotFound, got %v", err)
+	}
+}
+
+func TestGetDeviceTimezone_FallbackChain(t *testing.T) {
+	// Case 1: device timezone set → returns device timezone
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+	loc := server.GetDeviceTimezone("DEV001")
+	if loc == nil || loc.String() != "Europe/Istanbul" {
+		t.Errorf("expected Europe/Istanbul, got %v", loc)
+	}
+
+	// Case 2: no device timezone → returns server default
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server2 := NewADMSServer(WithDefaultTimezone(berlin))
+	defer server2.Close()
+
+	if err := server2.RegisterDevice("DEV002"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+	loc = server2.GetDeviceTimezone("DEV002")
+	if loc == nil || loc.String() != "Europe/Berlin" {
+		t.Errorf("expected Europe/Berlin (server default), got %v", loc)
+	}
+
+	// Case 3: no device timezone, no custom server default → returns UTC
+	server3 := NewADMSServer()
+	defer server3.Close()
+
+	if err := server3.RegisterDevice("DEV003"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+	loc = server3.GetDeviceTimezone("DEV003")
+	if loc == nil || loc.String() != "UTC" {
+		t.Errorf("expected UTC (fallback), got %v", loc)
+	}
+
+	// Case 4: unknown device → returns nil
+	loc = server3.GetDeviceTimezone("NOSUCH")
+	if loc != nil {
+		t.Errorf("expected nil for unknown device, got %v", loc)
+	}
+}
+
+func TestGetDeviceTimezone_DeviceOverridesDefault(t *testing.T) {
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer(WithDefaultTimezone(berlin))
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	loc := server.GetDeviceTimezone("DEV001")
+	if loc == nil || loc.String() != "Europe/Istanbul" {
+		t.Errorf("expected device-specific Europe/Istanbul to override server default, got %v", loc)
+	}
+}
+
+func TestDeviceCopy_IncludesTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(tokyo)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	dev := server.GetDevice("DEV001")
+	if dev.Timezone == nil || dev.Timezone.String() != "Asia/Tokyo" {
+		t.Errorf("expected copied device to have Asia/Tokyo, got %v", dev.Timezone)
+	}
+}
+
+func TestParseAttendance_DeviceTimezone(t *testing.T) {
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer()
+	defer server.Close()
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", istanbul)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+	// 09:00 Istanbul (UTC+3) = 06:00 UTC
+	expectedUTC := time.Date(2024, 6, 15, 6, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+}
+
+func TestParseAttendance_DefaultTimezone(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer()
+	defer server.Close()
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", berlin)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+	// 09:00 Berlin (UTC+2 in summer CEST) = 07:00 UTC
+	expectedUTC := time.Date(2024, 6, 15, 7, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+}
+
+func TestParseAttendance_UTC_Fallback(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", time.UTC)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+	expectedUTC := time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+}
+
+func TestParseAttendance_UnixEpoch_IgnoresLocation(t *testing.T) {
+	// Unix epoch timestamps are inherently UTC — location should not affect them.
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer()
+	defer server.Close()
+
+	// 1718442000 = 2024-06-15 09:00:00 UTC
+	data := "123\t1718442000\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", istanbul)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+	expectedUTC := time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v (unchanged by location), got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+}
+
+func TestHandleCData_AttendanceUsesDeviceTimezone(t *testing.T) {
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	received := make(chan AttendanceRecord, 1)
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, rec AttendanceRecord) {
+			received <- rec
+		}),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	select {
+	case rec := <-received:
+		// 09:00 Istanbul (UTC+3) = 06:00 UTC
+		expectedUTC := time.Date(2024, 6, 15, 6, 0, 0, 0, time.UTC)
+		if !rec.Timestamp.Equal(expectedUTC) {
+			t.Errorf("expected %v, got %v", expectedUTC, rec.Timestamp.UTC())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for attendance callback")
+	}
+}
+
+func TestHandleCData_AttendanceUsesServerDefaultTimezone(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	received := make(chan AttendanceRecord, 1)
+	server := NewADMSServer(
+		WithDefaultTimezone(tokyo),
+		WithOnAttendance(func(_ context.Context, rec AttendanceRecord) {
+			received <- rec
+		}),
+	)
+	defer server.Close()
+
+	// Device registered without explicit timezone — should use server default.
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001&table=ATTLOG", strings.NewReader(data))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	select {
+	case rec := <-received:
+		// 09:00 Tokyo (UTC+9) = 00:00 UTC
+		expectedUTC := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
+		if !rec.Timestamp.Equal(expectedUTC) {
+			t.Errorf("expected %v, got %v", expectedUTC, rec.Timestamp.UTC())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for attendance callback")
+	}
+}
+
+func TestHandleCData_MultiDeviceDifferentTimezones(t *testing.T) {
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	received := make(chan AttendanceRecord, 2)
+	server := NewADMSServer(
+		WithOnAttendance(func(_ context.Context, rec AttendanceRecord) {
+			received <- rec
+		}),
+	)
+	defer server.Close()
+
+	if err := server.RegisterDevice("IST001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice IST001 failed: %v", err)
+	}
+	if err := server.RegisterDevice("TKY001", WithDeviceTimezone(tokyo)); err != nil {
+		t.Fatalf("RegisterDevice TKY001 failed: %v", err)
+	}
+
+	// Both devices report "09:00:00" but in different timezones.
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+
+	req1 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=IST001&table=ATTLOG", strings.NewReader(data))
+	w1 := httptest.NewRecorder()
+	server.HandleCData(w1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=TKY001&table=ATTLOG", strings.NewReader(data))
+	w2 := httptest.NewRecorder()
+	server.HandleCData(w2, req2)
+
+	istanbulExpected := time.Date(2024, 6, 15, 6, 0, 0, 0, time.UTC) // UTC+3
+	tokyoExpected := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)    // UTC+9
+
+	results := make(map[string]time.Time)
+	for range 2 {
+		select {
+		case rec := <-received:
+			results[rec.SerialNumber] = rec.Timestamp.UTC()
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for attendance callbacks")
+		}
+	}
+
+	if !results["IST001"].Equal(istanbulExpected) {
+		t.Errorf("IST001: expected %v, got %v", istanbulExpected, results["IST001"])
+	}
+	if !results["TKY001"].Equal(tokyoExpected) {
+		t.Errorf("TKY001: expected %v, got %v", tokyoExpected, results["TKY001"])
+	}
+}
+
+func TestDeviceSnapshot_IncludesTimezone(t *testing.T) {
+	istanbul, err := time.LoadLocation("Europe/Istanbul")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001", WithDeviceTimezone(istanbul)); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Devices []DeviceSnapshot `json:"devices"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(resp.Devices))
+	}
+	if resp.Devices[0].Timezone != "Europe/Istanbul" {
+		t.Errorf("expected timezone Europe/Istanbul in snapshot, got %q", resp.Devices[0].Timezone)
+	}
+}
+
+func TestDeviceSnapshot_DefaultTimezoneInSnapshot(t *testing.T) {
+	server := NewADMSServer(WithEnableInspect())
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/iclock/inspect", nil)
+	w := httptest.NewRecorder()
+	server.HandleInspect(w, req)
+
+	var resp struct {
+		Devices []DeviceSnapshot `json:"devices"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(resp.Devices))
+	}
+	if resp.Devices[0].Timezone != "UTC" {
+		t.Errorf("expected UTC timezone in snapshot, got %q", resp.Devices[0].Timezone)
+	}
+}
+
+func TestWithDefaultTimezone(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer(WithDefaultTimezone(berlin))
+	defer server.Close()
+
+	if server.defaultTimezone.String() != "Europe/Berlin" {
+		t.Errorf("expected server default Europe/Berlin, got %s", server.defaultTimezone.String())
+	}
+}
+
+func TestWithDefaultTimezone_NilIgnored(t *testing.T) {
+	server := NewADMSServer(WithDefaultTimezone(nil))
+	defer server.Close()
+
+	if server.defaultTimezone.String() != "UTC" {
+		t.Errorf("expected UTC when nil passed, got %s", server.defaultTimezone.String())
+	}
+}
+
+func TestWithDeviceTimezone_NilSetsNil(t *testing.T) {
+	d := &Device{}
+	opt := WithDeviceTimezone(nil)
+	opt(d)
+	if d.Timezone != nil {
+		t.Errorf("expected nil timezone, got %v", d.Timezone)
+	}
+}
+
+func TestParseAttendance_WinterSummerTime(t *testing.T) {
+	// Verify DST transitions are handled correctly.
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewADMSServer()
+	defer server.Close()
+
+	// Winter time (CET = UTC+1): 2024-01-15 09:00:00 → 08:00 UTC
+	winter := "123\t2024-01-15 09:00:00\t0\t15\t0"
+	winterRecords := server.parseAttendanceRecords(winter, "DEV001", berlin)
+	if len(winterRecords) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(winterRecords))
+	}
+	winterExpected := time.Date(2024, 1, 15, 8, 0, 0, 0, time.UTC)
+	if !winterRecords[0].Timestamp.Equal(winterExpected) {
+		t.Errorf("winter: expected %v, got %v", winterExpected, winterRecords[0].Timestamp.UTC())
+	}
+
+	// Summer time (CEST = UTC+2): 2024-07-15 09:00:00 → 07:00 UTC
+	summer := "123\t2024-07-15 09:00:00\t0\t15\t0"
+	summerRecords := server.parseAttendanceRecords(summer, "DEV001", berlin)
+	if len(summerRecords) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(summerRecords))
+	}
+	summerExpected := time.Date(2024, 7, 15, 7, 0, 0, 0, time.UTC)
+	if !summerRecords[0].Timestamp.Equal(summerExpected) {
+		t.Errorf("summer: expected %v, got %v", summerExpected, summerRecords[0].Timestamp.UTC())
 	}
 }

@@ -180,6 +180,10 @@ var (
 
 	// ErrInvalidSerialNumber is returned when a serial number fails validation.
 	ErrInvalidSerialNumber = errors.New("zkadms: invalid serial number")
+
+	// ErrDeviceNotFound is returned when an operation targets a device that
+	// is not registered with the server.
+	ErrDeviceNotFound = errors.New("zkadms: device not found")
 )
 
 // serialNumberRe matches valid device serial numbers: 1–64 alphanumeric
@@ -188,6 +192,20 @@ var serialNumberRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // Option configures an [ADMSServer]. Use the With* functions to obtain options.
 type Option func(*ADMSServer)
+
+// DeviceOption configures a [Device] during registration.
+// Use the WithDevice* functions to obtain device options.
+type DeviceOption func(*Device)
+
+// WithDeviceTimezone sets the timezone for a device. Attendance timestamps
+// from this device are interpreted in the given location using
+// [time.ParseInLocation]. If not set, the server's default timezone is used
+// (see [WithDefaultTimezone]).
+func WithDeviceTimezone(loc *time.Location) DeviceOption {
+	return func(d *Device) {
+		d.Timezone = loc
+	}
+}
 
 // WithLogger sets the structured logger for the server.
 // If not provided, [slog.Default] is used.
@@ -365,19 +383,33 @@ func WithDeviceEvictionTimeout(d time.Duration) Option {
 	}
 }
 
+// WithDefaultTimezone sets the fallback timezone used to interpret attendance
+// timestamps from devices that have no explicit timezone configured via
+// [WithDeviceTimezone]. The default is [time.UTC].
+func WithDefaultTimezone(loc *time.Location) Option {
+	return func(s *ADMSServer) {
+		if loc != nil {
+			s.defaultTimezone = loc
+		}
+	}
+}
+
 // Device represents a ZKTeco device
 type Device struct {
 	SerialNumber string
 	LastActivity time.Time
 	Options      map[string]string
+	Timezone     *time.Location // nil = use server default (see WithDefaultTimezone)
 }
 
 // copy returns a deep copy of the Device, including its Options map.
+// Timezone is a shallow copy because *time.Location is immutable after creation.
 func (d *Device) copy() *Device {
 	return &Device{
 		SerialNumber: d.SerialNumber,
 		LastActivity: d.LastActivity,
 		Options:      maps.Clone(d.Options),
+		Timezone:     d.Timezone,
 	}
 }
 
@@ -397,6 +429,7 @@ type DeviceSnapshot struct {
 	LastActivity string            `json:"lastActivity"`
 	Online       bool              `json:"online"`
 	Options      map[string]string `json:"options"`
+	Timezone     string            `json:"timezone"`
 }
 
 // CommandResult represents the result of a command execution reported by a
@@ -500,6 +533,8 @@ type ADMSServer struct {
 	deviceEvictionInterval time.Duration // how often the eviction worker runs
 	deviceEvictionTimeout  time.Duration // inactivity threshold for eviction
 
+	defaultTimezone *time.Location // fallback TZ for devices without explicit timezone
+
 	baseCtx       context.Context
 	baseCtxCancel context.CancelFunc
 
@@ -535,6 +570,7 @@ func NewADMSServer(opts ...Option) *ADMSServer {
 		dispatchTimeout:        defaultDispatchTimeout,
 		deviceEvictionInterval: defaultDeviceEvictionInterval,
 		deviceEvictionTimeout:  defaultDeviceEvictionTimeout,
+		defaultTimezone:        time.UTC,
 		callbackDone:           make(chan struct{}),
 		evictionDone:           make(chan struct{}),
 		closeCh:                make(chan struct{}),
@@ -905,11 +941,16 @@ func (s *ADMSServer) registerOrReject(w http.ResponseWriter, serialNumber string
 	return true
 }
 
-// RegisterDevice registers a new device.
+// RegisterDevice registers a new device or updates an existing one.
 // It returns [ErrMaxDevicesReached] if the server's device limit (configured
 // via [WithMaxDevices]) has been reached and the device is not already known.
 // It returns [ErrInvalidSerialNumber] if the serial number is malformed.
-func (s *ADMSServer) RegisterDevice(serialNumber string) error {
+//
+// Use [DeviceOption] values to configure the device:
+//
+//	loc, _ := time.LoadLocation("Europe/Istanbul")
+//	server.RegisterDevice("SN001", WithDeviceTimezone(loc))
+func (s *ADMSServer) RegisterDevice(serialNumber string, opts ...DeviceOption) error {
 	if err := validateSerialNumber(serialNumber); err != nil {
 		return err
 	}
@@ -917,15 +958,20 @@ func (s *ADMSServer) RegisterDevice(serialNumber string) error {
 	s.devicesMutex.Lock()
 	defer s.devicesMutex.Unlock()
 
-	if _, exists := s.devices[serialNumber]; !exists {
+	dev, exists := s.devices[serialNumber]
+	if !exists {
 		if s.maxDevices > 0 && len(s.devices) >= s.maxDevices {
 			return ErrMaxDevicesReached
 		}
-		s.devices[serialNumber] = &Device{
+		dev = &Device{
 			SerialNumber: serialNumber,
 			LastActivity: time.Now(),
 			Options:      make(map[string]string),
 		}
+		s.devices[serialNumber] = dev
+	}
+	for _, opt := range opts {
+		opt(dev)
 	}
 	return nil
 }
@@ -949,6 +995,35 @@ func (s *ADMSServer) IsDeviceOnline(serialNumber string) bool {
 	defer s.devicesMutex.RUnlock()
 	d := s.devices[serialNumber]
 	return s.isDeviceOnline(d)
+}
+
+// SetDeviceTimezone sets the timezone for a registered device. Attendance
+// timestamps from this device will be interpreted in the given location.
+// Pass nil to clear the device-specific timezone and fall back to the
+// server default (see [WithDefaultTimezone]).
+// Returns [ErrDeviceNotFound] if the device is not registered.
+func (s *ADMSServer) SetDeviceTimezone(serialNumber string, loc *time.Location) error {
+	s.devicesMutex.Lock()
+	defer s.devicesMutex.Unlock()
+	d := s.devices[serialNumber]
+	if d == nil {
+		return ErrDeviceNotFound
+	}
+	d.Timezone = loc
+	return nil
+}
+
+// GetDeviceTimezone returns the effective timezone for a device.
+// Resolution order: device-specific timezone, server default
+// ([WithDefaultTimezone]), then [time.UTC].
+// Returns nil if the device is not registered.
+func (s *ADMSServer) GetDeviceTimezone(serialNumber string) *time.Location {
+	s.devicesMutex.RLock()
+	defer s.devicesMutex.RUnlock()
+	if s.devices[serialNumber] == nil {
+		return nil
+	}
+	return s.deviceLocationLocked(serialNumber)
 }
 
 // QueueCommand adds a command to be sent to the device on its next poll.
@@ -1020,7 +1095,12 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			s.logger.Debug("ATTLOG body", "preview", bodyPreview(body))
 		}
 
-		records := s.parseAttendanceRecords(string(body), serialNumber)
+		// Resolve the device's timezone for timestamp interpretation.
+		s.devicesMutex.RLock()
+		loc := s.deviceLocationLocked(serialNumber)
+		s.devicesMutex.RUnlock()
+
+		records := s.parseAttendanceRecords(string(body), serialNumber, loc)
 		if !s.dispatchAttendance(records) {
 			s.logger.Error("callback queue full, records not processed",
 				"count", len(records), "device", serialNumber)
@@ -1246,11 +1326,30 @@ func (s *ADMSServer) isDeviceOnline(device *Device) bool {
 	return time.Since(device.LastActivity) <= s.onlineThreshold
 }
 
+// deviceLocationLocked returns the timezone to use when parsing attendance
+// timestamps for the given device. Resolution order: device-specific timezone,
+// server default (defaultTimezone), then time.UTC.
+//
+// The caller must hold devicesMutex (at least RLock).
+func (s *ADMSServer) deviceLocationLocked(serialNumber string) *time.Location {
+	if d := s.devices[serialNumber]; d != nil && d.Timezone != nil {
+		return d.Timezone
+	}
+	if s.defaultTimezone != nil {
+		return s.defaultTimezone
+	}
+	return time.UTC
+}
+
 // parseAttendanceRecords parses attendance records from the device ATTLOG data.
 // Each line must have at least a UserID and a parseable timestamp (either
 // "2006-01-02 15:04:05" format or a Unix epoch integer). Malformed lines are
 // skipped and logged so downstream systems never receive zero-value timestamps.
-func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []AttendanceRecord {
+//
+// The loc parameter specifies the timezone in which device-local timestamps
+// (the "2006-01-02 15:04:05" format) are interpreted. Unix epoch timestamps
+// are inherently UTC and are not affected by loc.
+func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string, loc *time.Location) []AttendanceRecord {
 	var records []AttendanceRecord
 	var skipped int
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
@@ -1274,17 +1373,8 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string) []
 			continue
 		}
 
-		// TODO(timezone): time.Parse returns timestamps without a timezone
-		// (effectively UTC), but ZKTeco devices report timestamps in their
-		// configured local time. For any deployment where devices are not set
-		// to UTC this produces silently wrong timestamps — e.g. a 09:00 local
-		// check-in is stored as 09:00 UTC instead of the correct UTC offset.
-		// This affects payroll, compliance reports, and any cross-timezone
-		// logic. A future WithDeviceTimezone(*time.Location) option should
-		// switch this call to time.ParseInLocation so the server can
-		// interpret device-local timestamps correctly.
 		var ts time.Time
-		if parsed, err := time.Parse(timestampFormat, parts[attFieldTimestamp]); err == nil {
+		if parsed, err := time.ParseInLocation(timestampFormat, parts[attFieldTimestamp], loc); err == nil {
 			ts = parsed
 		} else if epoch, err := strconv.ParseInt(parts[attFieldTimestamp], 10, 64); err == nil {
 			ts = time.Unix(epoch, 0)
@@ -1624,6 +1714,7 @@ func (s *ADMSServer) HandleInspect(w http.ResponseWriter, r *http.Request) {
 			LastActivity: dc.LastActivity.Format(time.RFC3339),
 			Online:       s.isDeviceOnline(d),
 			Options:      dc.Options,
+			Timezone:     s.deviceLocationLocked(dc.SerialNumber).String(),
 		}
 		snapshot.Devices = append(snapshot.Devices, snap)
 	}
