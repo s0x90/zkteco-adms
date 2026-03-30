@@ -211,6 +211,7 @@ type deviceEntry struct {
 	LastActivity string            `json:"last_activity"`
 	Online       bool              `json:"online"`
 	Options      map[string]string `json:"options,omitzero"`
+	Timezone     string            `json:"timezone"`
 	PendingCmds  int               `json:"pending_commands"`
 }
 
@@ -594,6 +595,7 @@ func handleListDevices(server *zkadms.ADMSServer) http.Handler {
 				LastActivity: d.LastActivity.Format(time.RFC3339),
 				Online:       server.IsDeviceOnline(d.SerialNumber),
 				Options:      d.Options,
+				Timezone:     server.GetDeviceTimezone(d.SerialNumber).String(),
 				PendingCmds:  server.PendingCommandsCount(d.SerialNumber),
 			}
 		}
@@ -614,6 +616,7 @@ func handleDeviceDetail(server *zkadms.ADMSServer) http.Handler {
 			LastActivity: d.LastActivity.Format(time.RFC3339),
 			Online:       server.IsDeviceOnline(sn),
 			Options:      d.Options,
+			Timezone:     server.GetDeviceTimezone(sn).String(),
 			PendingCmds:  server.PendingCommandsCount(sn),
 		}
 		writeJSON(w, http.StatusOK, entry)

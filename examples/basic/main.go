@@ -196,6 +196,7 @@ func statusHandler(server *zkadms.ADMSServer) http.Handler {
 			fmt.Fprintf(w, "Serial Number: %s\n", device.SerialNumber)
 			fmt.Fprintf(w, "Last Activity: %s\n", device.LastActivity.Format(time.RFC3339))
 			fmt.Fprintf(w, "Online: %t\n", online)
+			fmt.Fprintf(w, "Timezone: %s\n", server.GetDeviceTimezone(device.SerialNumber))
 			fmt.Fprintf(w, "Options: %v\n", device.Options)
 			fmt.Fprintln(w, "---")
 		}
