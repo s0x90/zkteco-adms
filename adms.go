@@ -1354,6 +1354,11 @@ func (s *ADMSServer) deviceLocationLocked(serialNumber string) *time.Location {
 func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string, loc *time.Location) []AttendanceRecord {
 	var records []AttendanceRecord
 	var skipped int
+
+	if loc == nil {
+		loc = time.UTC
+	}
+
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
 		line = strings.TrimRight(line, "\r") // handle \r\n line endings
 		if line == "" {
