@@ -30,7 +30,7 @@ This library provides a complete implementation of the HTTP-based ADMS protocol 
 
 ## Installation
 
-Requires Go 1.26 or higher.
+Requires Go 1.26.
 
 ```bash
 go get github.com/s0x90/zkteco-adms
