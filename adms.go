@@ -203,7 +203,20 @@ type DeviceOption func(*Device)
 // (see [WithDefaultTimezone]).
 func WithDeviceTimezone(loc *time.Location) DeviceOption {
 	return func(d *Device) {
-		d.Timezone = loc
+		if loc != nil {
+			d.Timezone = loc
+		}
+	}
+}
+
+// WithDefaultTimezone sets the fallback timezone used to interpret attendance
+// timestamps from devices that have no explicit timezone configured via
+// [WithDeviceTimezone]. The default is [time.UTC].
+func WithDefaultTimezone(loc *time.Location) Option {
+	return func(s *ADMSServer) {
+		if loc != nil {
+			s.defaultTimezone = loc
+		}
 	}
 }
 
@@ -379,17 +392,6 @@ func WithDeviceEvictionTimeout(d time.Duration) Option {
 	return func(s *ADMSServer) {
 		if d > 0 {
 			s.deviceEvictionTimeout = d
-		}
-	}
-}
-
-// WithDefaultTimezone sets the fallback timezone used to interpret attendance
-// timestamps from devices that have no explicit timezone configured via
-// [WithDeviceTimezone]. The default is [time.UTC].
-func WithDefaultTimezone(loc *time.Location) Option {
-	return func(s *ADMSServer) {
-		if loc != nil {
-			s.defaultTimezone = loc
 		}
 	}
 }
