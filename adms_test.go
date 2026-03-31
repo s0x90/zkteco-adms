@@ -4704,6 +4704,24 @@ func TestParseAttendance_DefaultTimezone(t *testing.T) {
 	}
 }
 
+func TestParseAttendance_NilTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+	//  09:00 UTC
+	expectedUTC := time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+}
+
 func TestParseAttendance_UTC_Fallback(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
