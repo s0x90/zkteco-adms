@@ -1356,7 +1356,11 @@ func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string, lo
 	var skipped int
 
 	if loc == nil {
-		loc = time.UTC
+		if s.defaultTimezone != nil {
+			loc = s.defaultTimezone
+		} else {
+			loc = time.UTC
+		}
 	}
 
 	for line := range strings.SplitSeq(strings.TrimSpace(data), "\n") {
