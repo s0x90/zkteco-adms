@@ -4715,10 +4715,29 @@ func TestParseAttendance_NilTimezone(t *testing.T) {
 	}
 
 	rec := records[0]
+
 	//  09:00 UTC
 	expectedUTC := time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
 	if !rec.Timestamp.Equal(expectedUTC) {
 		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+
+	berlinTZ, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.defaultTimezone = berlinTZ
+	records = server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec = records[0]
+
+	//  09:00 UTC
+	expectedBerlin := time.Date(2024, 6, 15, 9, 0, 0, 0, berlinTZ)
+	if !rec.Timestamp.Equal(expectedBerlin) {
+		t.Errorf("expected timestamp %v, got %v", expectedBerlin, rec.Timestamp.UTC())
 	}
 }
 
