@@ -4734,7 +4734,7 @@ func TestParseAttendance_NilTimezone(t *testing.T) {
 
 	rec = records[0]
 
-	//  09:00 UTC
+	// 09:00 Berlin (UTC+2 in summer CEST) = 07:00 UTC
 	expectedBerlin := time.Date(2024, 6, 15, 9, 0, 0, 0, berlinTZ)
 	if !rec.Timestamp.Equal(expectedBerlin) {
 		t.Errorf("expected timestamp %v, got %v", expectedBerlin, rec.Timestamp.UTC())
