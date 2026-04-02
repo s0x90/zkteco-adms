@@ -1263,10 +1263,11 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 
 	for _, result := range results {
 		// Populate QueuedCommand from the pending commands map.
+		// Deletion is deferred until dispatch succeeds so that a device
+		// retry (after a 503) can still correlate the command.
 		s.queueMutex.Lock()
 		if entry, ok := s.pendingCommands[result.ID]; ok {
 			result.QueuedCommand = entry.cmd
-			delete(s.pendingCommands, result.ID)
 		}
 		s.queueMutex.Unlock()
 
@@ -1287,6 +1288,11 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 				http.StatusServiceUnavailable)
 			return
 		}
+
+		// Dispatch succeeded — remove the pending entry.
+		s.queueMutex.Lock()
+		delete(s.pendingCommands, result.ID)
+		s.queueMutex.Unlock()
 	}
 
 	w.WriteHeader(http.StatusOK)
