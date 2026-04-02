@@ -107,7 +107,7 @@ server := zkadms.NewADMSServer(
 defer server.Close()
 ```
 
-Note: the `ctx` passed to your callback is derived from the server's base context and will be cancelled when `server.Close()` is called, which makes it ideal for database calls.
+Note: the `ctx` passed to your callback is derived from the server's base context and will be cancelled after `server.Close()` finishes draining all queued callbacks. This means database calls and HTTP requests inside callbacks complete normally during graceful shutdown.
 
 ### 2. Send Notifications
 
@@ -161,7 +161,7 @@ go func() {
 ### Request Device Information
 
 ```go
-if err := server.SendInfoCommand("DEVICE001"); err != nil {
+if _, err := server.SendInfoCommand("DEVICE001"); err != nil {
     log.Printf("Failed to queue INFO command: %v", err)
 }
 ```
@@ -183,13 +183,16 @@ defer server.Close()
 ### Custom Commands
 
 ```go
-// Queue a command for the device (returns error if queue limit reached)
-if err := server.QueueCommand("DEVICE001", "CHECK"); err != nil {
+// Queue a command for the device (returns command ID and error)
+if _, err := server.QueueCommand("DEVICE001", "CHECK"); err != nil {
     log.Printf("Failed to queue command: %v", err)
 }
 
 // Drain all pending commands (useful for custom polling logic)
 cmds := server.DrainCommands("DEVICE001")
+for _, cmd := range cmds {
+    fmt.Println(cmd.ID, cmd.Command)
+}
 ```
 
 ## Configuring the Server

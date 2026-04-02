@@ -184,6 +184,10 @@ var (
 	// ErrDeviceNotFound is returned when an operation targets a device that
 	// is not registered with the server.
 	ErrDeviceNotFound = errors.New("zkadms: device not found")
+
+	// ErrInvalidCommandField is returned when a command field contains
+	// control characters that could cause injection on the ADMS wire protocol.
+	ErrInvalidCommandField = errors.New("zkadms: command field contains forbidden control characters")
 )
 
 // serialNumberRe matches valid device serial numbers: 1–64 alphanumeric
@@ -595,13 +599,17 @@ func NewADMSServer(opts ...Option) *ADMSServer {
 
 // Close drains the callback queue and stops the worker goroutine.
 // It blocks until all pending callbacks have been executed and the
-// eviction worker has exited.
+// eviction worker has exited. The base context passed to callbacks
+// remains valid until all queued callbacks have finished executing,
+// so database calls and HTTP requests inside callbacks complete
+// normally during shutdown.
 // Close is safe to call multiple times.
 func (s *ADMSServer) Close() {
 	s.closeOnce.Do(func() {
-		// Cancel the base context so callbacks see cancellation.
-		s.baseCtxCancel()
-		// Signal all dispatchers and the eviction worker to stop.
+		// Signal all dispatchers and the eviction worker to stop
+		// accepting new work. Note: baseCtxCancel is intentionally
+		// deferred until after the callback worker drains, so that
+		// in-flight callbacks still have a live context for I/O.
 		close(s.closeCh)
 		// Wait for the eviction worker to exit before tearing down the
 		// callback pipeline, so no late eviction log races with closure.
@@ -614,6 +622,8 @@ func (s *ADMSServer) Close() {
 		s.callbackMu.Unlock()
 		// Wait for the worker to drain all remaining callbacks and exit.
 		<-s.callbackDone
+		// Cancel the base context after all callbacks have completed.
+		s.baseCtxCancel()
 	})
 }
 
@@ -1031,30 +1041,64 @@ func (s *ADMSServer) GetDeviceTimezone(serialNumber string) *time.Location {
 // QueueCommand adds a command to be sent to the device on its next poll.
 // It assigns a monotonically increasing command ID at queue time and returns
 // the ID so callers can correlate the command with its [CommandResult].
+// It returns [ErrDeviceNotFound] if the device is not registered with the server.
+// It returns [ErrInvalidCommandField] if the command contains control characters
+// that could cause injection on the ADMS wire protocol.
 // It returns [ErrCommandQueueFull] (with ID 0) if the per-device limit
 // configured via [WithMaxCommandsPerDevice] has been reached.
 func (s *ADMSServer) QueueCommand(serialNumber, command string) (int64, error) {
+	if err := validateCommandField("command", command); err != nil {
+		return 0, err
+	}
+
+	s.devicesMutex.RLock()
+	_, exists := s.devices[serialNumber]
+	s.devicesMutex.RUnlock()
+	if !exists {
+		return 0, ErrDeviceNotFound
+	}
+
 	id := s.cmdID.Add(1)
 
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
-	if s.maxCommandsPerDevice > 0 && len(s.commandQueue[serialNumber]) >= s.maxCommandsPerDevice {
-		return 0, ErrCommandQueueFull
+	if s.maxCommandsPerDevice > 0 {
+		queued := len(s.commandQueue[serialNumber])
+		pending := s.pendingCountLocked(serialNumber)
+		if queued+pending >= s.maxCommandsPerDevice {
+			return 0, ErrCommandQueueFull
+		}
 	}
 	s.commandQueue[serialNumber] = append(s.commandQueue[serialNumber], CommandEntry{ID: id, Command: command})
-	s.pendingCommands[id] = pendingEntry{sn: serialNumber, cmd: command}
 	return id, nil
 }
 
-// DrainCommands retrieves and removes all pending commands for a device.
-// After this call, the device's command queue is empty.
+// pendingCountLocked returns the number of pending (drained but unconfirmed)
+// commands for the given serial number. The caller must hold s.queueMutex.
+func (s *ADMSServer) pendingCountLocked(serialNumber string) int {
+	n := 0
+	for _, entry := range s.pendingCommands {
+		if entry.sn == serialNumber {
+			n++
+		}
+	}
+	return n
+}
+
+// DrainCommands retrieves and removes all queued commands for a device.
+// After this call, the device's command queue is empty. Drained commands
+// are tracked as pending until the device confirms execution via
+// /iclock/devicecmd.
 func (s *ADMSServer) DrainCommands(serialNumber string) []CommandEntry {
 	s.queueMutex.Lock()
 	defer s.queueMutex.Unlock()
 
 	commands := s.commandQueue[serialNumber]
 	delete(s.commandQueue, serialNumber)
+	for _, cmd := range commands {
+		s.pendingCommands[cmd.ID] = pendingEntry{sn: serialNumber, cmd: cmd.Command}
+	}
 	return commands
 }
 
@@ -1132,8 +1176,11 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			s.logger.Debug("USERINFO records processed",
 				"count", len(users), "device", serialNumber)
 			if !s.dispatchQueryUsers(serialNumber, users) {
-				s.logger.Warn("callback queue full, user records dropped",
+				s.logger.Error("callback queue full, user records dropped",
 					"count", len(users), "device", serialNumber)
+				http.Error(w, fmt.Sprintf("FAIL: callback queue full, %d user records not processed", len(users)),
+					http.StatusServiceUnavailable)
+				return
 			}
 		}
 
@@ -1150,8 +1197,11 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			if len(body) > 0 {
 				info := s.parseKVPairs(string(body), "\n", nil)
 				if !s.dispatchDeviceInfo(serialNumber, info) {
-					s.logger.Warn("callback queue full, device info dropped",
+					s.logger.Error("callback queue full, device info dropped",
 						"device", serialNumber)
+					http.Error(w, "FAIL: callback queue full, device info not processed",
+						http.StatusServiceUnavailable)
+					return
 				}
 				s.logger.Debug("INFO body", "preview", bodyPreview(body))
 			}
@@ -1213,10 +1263,11 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 
 	for _, result := range results {
 		// Populate QueuedCommand from the pending commands map.
+		// Deletion is deferred until dispatch succeeds so that a device
+		// retry (after a 503) can still correlate the command.
 		s.queueMutex.Lock()
 		if entry, ok := s.pendingCommands[result.ID]; ok {
 			result.QueuedCommand = entry.cmd
-			delete(s.pendingCommands, result.ID)
 		}
 		s.queueMutex.Unlock()
 
@@ -1231,9 +1282,17 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 			"queued_cmd", result.QueuedCommand)
 
 		if !s.dispatchCommandResult(result) {
-			s.logger.Warn("callback queue full, command result dropped",
+			s.logger.Error("callback queue full, command result dropped",
 				"device", serialNumber, "id", result.ID)
+			http.Error(w, fmt.Sprintf("FAIL: callback queue full, command result %d not processed", result.ID),
+				http.StatusServiceUnavailable)
+			return
 		}
+
+		// Dispatch succeeded — remove the pending entry.
+		s.queueMutex.Lock()
+		delete(s.pendingCommands, result.ID)
+		s.queueMutex.Unlock()
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -1520,6 +1579,17 @@ func (s *ADMSServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// validateCommandField checks that a command field value does not contain
+// control characters that could cause injection on the ADMS wire protocol.
+// The wire format uses "C:<ID>:<CMD>\n", so newlines and carriage returns
+// in field values would allow injecting extra command lines.
+func validateCommandField(name, value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("%w: %s", ErrInvalidCommandField, name)
+	}
+	return nil
+}
+
 // SendInfoCommand queues an INFO command to request device information.
 // It returns the assigned command ID and an error if the command queue is full
 // (see [WithMaxCommandsPerDevice]).
@@ -1541,6 +1611,13 @@ func (s *ADMSServer) SendInfoCommand(serialNumber string) (int64, error) {
 // It returns the assigned command ID and an error if the command queue is full
 // (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) (int64, error) {
+	for _, f := range []struct{ name, value string }{
+		{"pin", pin}, {"name", name}, {"card", card},
+	} {
+		if err := validateCommandField(f.name, f.value); err != nil {
+			return 0, err
+		}
+	}
 	cmd := fmt.Sprintf("DATA UPDATE USERINFO PIN=%s\tName=%s\tPrivilege=%d\tCard=%s", pin, name, privilege, card)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1557,6 +1634,9 @@ func (s *ADMSServer) SendUserAddCommand(serialNumber, pin, name string, privileg
 // It returns the assigned command ID and an error if the command queue is full
 // (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendUserDeleteCommand(serialNumber, pin string) (int64, error) {
+	if err := validateCommandField("pin", pin); err != nil {
+		return 0, err
+	}
 	cmd := fmt.Sprintf("DATA DELETE USERINFO PIN=%s", pin)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1586,6 +1666,9 @@ func (s *ADMSServer) SendCheckCommand(serialNumber string) (int64, error) {
 // It returns the assigned command ID and an error if the command queue is full
 // (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) (int64, error) {
+	if err := validateCommandField("key", key); err != nil {
+		return 0, err
+	}
 	cmd := fmt.Sprintf("GET OPTION FROM %s", key)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1605,6 +1688,9 @@ func (s *ADMSServer) SendGetOptionCommand(serialNumber, key string) (int64, erro
 // It returns the assigned command ID and an error if the command queue is full
 // (see [WithMaxCommandsPerDevice]).
 func (s *ADMSServer) SendShellCommand(serialNumber, command string) (int64, error) {
+	if err := validateCommandField("command", command); err != nil {
+		return 0, err
+	}
 	cmd := fmt.Sprintf("Shell %s", command)
 	return s.QueueCommand(serialNumber, cmd)
 }
@@ -1697,8 +1783,11 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 		s.devicesMutex.Unlock()
 		if !s.dispatchRegistry(serialNumber, info) {
-			s.logger.Warn("callback queue full, registry info dropped",
+			s.logger.Error("callback queue full, registry info dropped",
 				"device", serialNumber)
+			http.Error(w, "FAIL: callback queue full, registry info not processed",
+				http.StatusServiceUnavailable)
+			return
 		}
 	}
 	w.WriteHeader(http.StatusOK)

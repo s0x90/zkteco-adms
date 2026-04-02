@@ -108,6 +108,10 @@ func TestQueueAndGetCommands(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.QueueCommand(serialNumber, "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
@@ -136,6 +140,10 @@ func TestQueueAndGetCommands(t *testing.T) {
 func TestDrainCommandsDeletesKey(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
+
+	if err := server.RegisterDevice("DEL001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.QueueCommand("DEL001", "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
@@ -251,6 +259,10 @@ func TestHandleCData_WithPendingCommands(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.QueueCommand(serialNumber, "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
@@ -272,6 +284,10 @@ func TestHandleGetRequest(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
+
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.QueueCommand(serialNumber, "DATA DELETE USERINFO PIN=1001"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
@@ -729,6 +745,10 @@ func TestQueueCommand(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.QueueCommand(serialNumber, "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
@@ -746,6 +766,10 @@ func TestSendUserAddCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "TEST001"
+
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.SendUserAddCommand(serialNumber, "1001", "John Doe", 0, "12345678"); err != nil {
 		t.Fatalf("SendUserAddCommand failed: %v", err)
@@ -766,6 +790,10 @@ func TestSendUserDeleteCommand(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendUserDeleteCommand(serialNumber, "1001"); err != nil {
 		t.Fatalf("SendUserDeleteCommand failed: %v", err)
 	}
@@ -785,6 +813,10 @@ func TestSendInfoCommand(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendInfoCommand(serialNumber); err != nil {
 		t.Fatalf("SendInfoCommand failed: %v", err)
 	}
@@ -802,6 +834,10 @@ func TestSendCheckCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendCheckCommand("TEST001"); err != nil {
 		t.Fatalf("SendCheckCommand failed: %v", err)
 	}
@@ -818,6 +854,10 @@ func TestSendCheckCommand(t *testing.T) {
 func TestSendGetOptionCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
+
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.SendGetOptionCommand("TEST001", "DeviceName"); err != nil {
 		t.Fatalf("SendGetOptionCommand failed: %v", err)
@@ -837,6 +877,10 @@ func TestSendShellCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendShellCommand("TEST001", "date"); err != nil {
 		t.Fatalf("SendShellCommand failed: %v", err)
 	}
@@ -855,6 +899,10 @@ func TestSendQueryUsersCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendQueryUsersCommand("TEST001"); err != nil {
 		t.Fatalf("SendQueryUsersCommand failed: %v", err)
 	}
@@ -872,6 +920,10 @@ func TestSendQueryUsersCommand(t *testing.T) {
 func TestSendLogCommand(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
+
+	if err := server.RegisterDevice("TEST001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.SendLogCommand("TEST001"); err != nil {
 		t.Fatalf("SendLogCommand failed: %v", err)
@@ -962,9 +1014,14 @@ func TestConcurrentAccess(t *testing.T) {
 	defer server.Close()
 	serialNumber := "TEST001"
 
+	// Register device first so QueueCommand calls succeed.
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	var wg sync.WaitGroup
 
-	// Concurrent device registration
+	// Concurrent device registration (idempotent)
 	for range 10 {
 		wg.Go(func() {
 			_ = server.RegisterDevice(serialNumber)
@@ -1675,6 +1732,10 @@ func TestDrainCommands(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("DRAIN001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.QueueCommand("DRAIN001", "CMD1"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
@@ -1701,6 +1762,10 @@ func TestDrainCommands_DeletesKey(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("DRAIN_DEL"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.QueueCommand("DRAIN_DEL", "INFO"); err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
@@ -1722,6 +1787,10 @@ func TestPendingCommandsCount(t *testing.T) {
 	// Zero for unknown device.
 	if n := server.PendingCommandsCount("NODEV"); n != 0 {
 		t.Errorf("expected 0 pending commands for unknown device, got %d", n)
+	}
+
+	if err := server.RegisterDevice("COUNT001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
 	}
 
 	// Queue a few commands and verify count without draining.
@@ -1908,22 +1977,40 @@ func TestWithMaxCommandsPerDevice(t *testing.T) {
 	defer server.Close()
 
 	sn := "CMD001"
-	for i := range 3 {
-		if _, err := server.QueueCommand(sn, "CMD"+string(rune('1'+i))); err != nil {
-			t.Fatalf("QueueCommand %d failed: %v", i+1, err)
-		}
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
 	}
 
-	// Fourth should fail.
+	ids := make([]int64, 3)
+	for i := range 3 {
+		id, err := server.QueueCommand(sn, "CMD"+string(rune('1'+i)))
+		if err != nil {
+			t.Fatalf("QueueCommand %d failed: %v", i+1, err)
+		}
+		ids[i] = id
+	}
+
+	// Fourth should fail — 3 queued + 0 pending = 3, which equals the limit.
 	_, err := server.QueueCommand(sn, "CMD4")
 	if !errors.Is(err, ErrCommandQueueFull) {
 		t.Errorf("expected ErrCommandQueueFull, got %v", err)
 	}
 
-	// Draining should free up space.
+	// Draining moves commands out of the queue, but they remain in
+	// pendingCommands until the device confirms execution. Simulate
+	// device confirmation via HandleDeviceCmd to free the slots.
 	_ = server.DrainCommands(sn)
+	for _, id := range ids {
+		body := fmt.Sprintf("ID=%d&Return=0&CMD=DATA", id)
+		req := httptest.NewRequest(http.MethodPost,
+			"/iclock/devicecmd?SN="+sn, strings.NewReader(body))
+		w := httptest.NewRecorder()
+		server.HandleDeviceCmd(w, req)
+	}
+
+	// Now all 3 pending entries are confirmed and removed; queueing should succeed.
 	if _, err := server.QueueCommand(sn, "CMD5"); err != nil {
-		t.Errorf("after drain, QueueCommand should succeed: %v", err)
+		t.Errorf("after drain+confirm, QueueCommand should succeed: %v", err)
 	}
 }
 
@@ -1931,8 +2018,12 @@ func TestWithMaxCommandsPerDevice_ZeroMeansUnlimited(t *testing.T) {
 	server := NewADMSServer(WithMaxCommandsPerDevice(0))
 	defer server.Close()
 
+	if err := server.RegisterDevice("DEV1"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	for i := range 100 {
-		if _, err := server.QueueCommand("DEV1", "CMD"+string(rune(i))); err != nil {
+		if _, err := server.QueueCommand("DEV1", fmt.Sprintf("CMD_%d", i)); err != nil {
 			t.Fatalf("QueueCommand %d failed: %v", i, err)
 		}
 	}
@@ -2076,6 +2167,10 @@ func TestSendUserAddCommand_ReturnsError(t *testing.T) {
 	defer server.Close()
 	sn := "TEST001"
 
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	// First command should succeed.
 	if _, err := server.SendUserAddCommand(sn, "1001", "John", 0, ""); err != nil {
 		t.Fatalf("SendUserAddCommand failed: %v", err)
@@ -2092,6 +2187,10 @@ func TestSendUserDeleteCommand_ReturnsError(t *testing.T) {
 	server := NewADMSServer(WithMaxCommandsPerDevice(1))
 	defer server.Close()
 	sn := "TEST001"
+
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	// First command should succeed.
 	if _, err := server.SendUserDeleteCommand(sn, "1001"); err != nil {
@@ -2110,6 +2209,10 @@ func TestSendInfoCommand_ReturnsError(t *testing.T) {
 	defer server.Close()
 	sn := "TEST001"
 
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	// First command should succeed.
 	if _, err := server.SendInfoCommand(sn); err != nil {
 		t.Fatalf("SendInfoCommand failed: %v", err)
@@ -2127,6 +2230,10 @@ func TestSendCheckCommand_ReturnsError(t *testing.T) {
 	defer server.Close()
 	sn := "TEST001"
 
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendCheckCommand(sn); err != nil {
 		t.Fatalf("SendCheckCommand failed: %v", err)
 	}
@@ -2141,6 +2248,10 @@ func TestSendGetOptionCommand_ReturnsError(t *testing.T) {
 	server := NewADMSServer(WithMaxCommandsPerDevice(1))
 	defer server.Close()
 	sn := "TEST001"
+
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.SendGetOptionCommand(sn, "DeviceName"); err != nil {
 		t.Fatalf("SendGetOptionCommand failed: %v", err)
@@ -2157,6 +2268,10 @@ func TestSendShellCommand_ReturnsError(t *testing.T) {
 	defer server.Close()
 	sn := "TEST001"
 
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendShellCommand(sn, "date"); err != nil {
 		t.Fatalf("SendShellCommand failed: %v", err)
 	}
@@ -2172,6 +2287,10 @@ func TestSendQueryUsersCommand_ReturnsError(t *testing.T) {
 	defer server.Close()
 	sn := "TEST001"
 
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	if _, err := server.SendQueryUsersCommand(sn); err != nil {
 		t.Fatalf("SendQueryUsersCommand failed: %v", err)
 	}
@@ -2186,6 +2305,10 @@ func TestSendLogCommand_ReturnsError(t *testing.T) {
 	server := NewADMSServer(WithMaxCommandsPerDevice(1))
 	defer server.Close()
 	sn := "TEST001"
+
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	if _, err := server.SendLogCommand(sn); err != nil {
 		t.Fatalf("SendLogCommand failed: %v", err)
@@ -2559,6 +2682,9 @@ func TestCommandIDIncrement(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 	serialNumber := "IDTEST001"
+	if err := server.RegisterDevice(serialNumber); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
 
 	// Queue 3 commands.
 	for _, cmd := range []string{"INFO", "REBOOT", "CHECK"} {
@@ -2598,6 +2724,10 @@ func TestCommandIDIncrement_AcrossRequests(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("DEV1"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	// First request: 1 command → ID=1
 	if _, err := server.QueueCommand("DEV1", "INFO"); err != nil {
 		t.Fatal(err)
@@ -2626,6 +2756,12 @@ func TestCommandIDIncrement_AcrossRequests(t *testing.T) {
 func TestCommandIDIncrement_AcrossDevices(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
+
+	for _, sn := range []string{"DEVA", "DEVB"} {
+		if err := server.RegisterDevice(sn); err != nil {
+			t.Fatalf("RegisterDevice(%s) failed: %v", sn, err)
+		}
+	}
 
 	// Commands for different devices share the same ID counter.
 	if _, err := server.QueueCommand("DEVA", "INFO"); err != nil {
@@ -3123,15 +3259,15 @@ func TestHandleCData_DefaultTable_DeviceInfoQueueFull(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	server.HandleCData(w2, req2)
 
-	// This dispatch should fail (queue full), but HandleCData still returns OK
-	// because device info dispatch failure is non-fatal (just logged as a warning).
+	// This dispatch should fail (queue full) and HandleCData returns 503
+	// to signal backpressure to the device.
 	req3 := httptest.NewRequest(http.MethodPost,
 		"/iclock/cdata?SN=DEV001", strings.NewReader(infoBody))
 	w3 := httptest.NewRecorder()
 	server.HandleCData(w3, req3)
 
-	if w3.Code != http.StatusOK {
-		t.Errorf("expected 200 (device info queue-full is non-fatal), got %d", w3.Code)
+	if w3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (device info queue-full), got %d", w3.Code)
 	}
 }
 
@@ -3212,15 +3348,15 @@ func TestHandleDeviceCmd_CallbackQueueFull(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	server.HandleDeviceCmd(w2, req2)
 
-	// Next dispatch should fail (queue full) — but handler still returns OK.
+	// Next dispatch should fail (queue full) — handler returns 503.
 	req3 := httptest.NewRequest(http.MethodPost,
 		"/iclock/devicecmd?SN=DEV001", strings.NewReader(body))
 	w3 := httptest.NewRecorder()
 	server.HandleDeviceCmd(w3, req3)
 
-	// HandleDeviceCmd always responds OK regardless of queue status.
-	if w3.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w3.Code)
+	// HandleDeviceCmd returns 503 when the callback queue is full.
+	if w3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w3.Code)
 	}
 }
 
@@ -3360,14 +3496,14 @@ func TestHandleRegistry_CallbackQueueFull(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	server.HandleRegistry(w2, req2)
 
-	// Should still return OK (registry queue-full is non-fatal).
+	// Should return 503 (registry queue-full signals backpressure).
 	req3 := httptest.NewRequest(http.MethodPost,
 		"/iclock/registry?SN=DEV001", strings.NewReader(regBody))
 	w3 := httptest.NewRecorder()
 	server.HandleRegistry(w3, req3)
 
-	if w3.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w3.Code)
+	if w3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w3.Code)
 	}
 }
 
@@ -3970,6 +4106,10 @@ func TestQueueCommand_ReturnsIncrementingIDs(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	ids := make(map[int64]bool)
 	var prev int64
 	for i := range 10 {
@@ -4000,11 +4140,16 @@ func TestCommandResult_QueuedCommandPopulated(t *testing.T) {
 	)
 	defer server.Close()
 
-	// Queue a command so pendingCommands has the mapping.
+	if err := server.RegisterDevice("CORR001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Queue a command and drain it so pendingCommands has the mapping.
 	id, err := server.QueueCommand("CORR001", "DATA UPDATE USERINFO PIN=1\tName=Alice")
 	if err != nil {
 		t.Fatalf("QueueCommand failed: %v", err)
 	}
+	_ = server.DrainCommands("CORR001")
 
 	// Simulate the device confirming execution via POST /iclock/devicecmd.
 	body := fmt.Sprintf("ID=%d&Return=0&CMD=DATA", id)
@@ -4080,7 +4225,7 @@ func TestPendingCommands_CleanupOnEviction(t *testing.T) {
 		t.Fatalf("RegisterDevice failed: %v", err)
 	}
 
-	// Queue commands to populate pendingCommands.
+	// Queue commands, then drain to populate pendingCommands.
 	id1, err := server.QueueCommand("EVICT01", "CMD_A")
 	if err != nil {
 		t.Fatalf("QueueCommand A failed: %v", err)
@@ -4089,8 +4234,9 @@ func TestPendingCommands_CleanupOnEviction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueueCommand B failed: %v", err)
 	}
+	_ = server.DrainCommands("EVICT01")
 
-	// Verify entries exist before eviction.
+	// Verify entries exist in pendingCommands before eviction.
 	server.queueMutex.Lock()
 	_, ok1 := server.pendingCommands[id1]
 	_, ok2 := server.pendingCommands[id2]
@@ -4342,6 +4488,10 @@ func TestSendQueryUsersCommand_ReturnsID(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
 
+	if err := server.RegisterDevice("QUSER001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
 	id, err := server.SendQueryUsersCommand("QUSER001")
 	if err != nil {
 		t.Fatalf("SendQueryUsersCommand failed: %v", err)
@@ -4433,16 +4583,15 @@ func TestHandleCData_USERINFO_CallbackQueueFull(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	server.HandleCData(w2, req2)
 
-	// Now queue should be full — dispatch will fail but handler still returns 200.
+	// Now queue should be full — dispatch will fail and handler returns 503.
 	req3 := httptest.NewRequest(http.MethodPost,
 		"/iclock/cdata?SN=DEV001&table=USERINFO", strings.NewReader(userData))
 	w3 := httptest.NewRecorder()
 	server.HandleCData(w3, req3)
 
-	// USERINFO handler always returns 200 OK even when callback queue is full
-	// (it logs a warning instead of returning 503).
-	if w3.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w3.Code)
+	// USERINFO handler returns 503 when callback queue is full.
+	if w3.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w3.Code)
 	}
 }
 
@@ -5071,5 +5220,172 @@ func TestParseAttendance_WinterSummerTime(t *testing.T) {
 	summerExpected := time.Date(2024, 7, 15, 7, 0, 0, 0, time.UTC)
 	if !summerRecords[0].Timestamp.Equal(summerExpected) {
 		t.Errorf("summer: expected %v, got %v", summerExpected, summerRecords[0].Timestamp.UTC())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// New tests for Items 1, 3, 4, 5 improvements
+// ---------------------------------------------------------------------------
+
+func TestQueueCommand_ReturnsErrDeviceNotFound(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	_, err := server.QueueCommand("NONEXISTENT", "INFO")
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Errorf("expected ErrDeviceNotFound, got %v", err)
+	}
+}
+
+func TestSendInfoCommand_ReturnsErrDeviceNotFound(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	_, err := server.SendInfoCommand("NONEXISTENT")
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Errorf("expected ErrDeviceNotFound, got %v", err)
+	}
+}
+
+func TestValidateCommandField_RejectsCRLF(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"newline", "CMD\nINJECTED"},
+		{"carriage return", "CMD\rINJECTED"},
+		{"crlf", "CMD\r\nINJECTED"},
+		{"trailing newline", "CMD\n"},
+		{"leading newline", "\nCMD"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCommandField("command", tc.value)
+			if !errors.Is(err, ErrInvalidCommandField) {
+				t.Errorf("expected ErrInvalidCommandField for %q, got %v", tc.value, err)
+			}
+		})
+	}
+}
+
+func TestValidateCommandField_AcceptsValid(t *testing.T) {
+	valid := []string{
+		"INFO",
+		"DATA UPDATE USERINFO PIN=1\tName=Alice",
+		"CHECK",
+		"SHELL echo hello",
+		"DATA QUERY USERINFO",
+	}
+
+	for _, v := range valid {
+		if err := validateCommandField("command", v); err != nil {
+			t.Errorf("expected nil for %q, got %v", v, err)
+		}
+	}
+}
+
+func TestQueueCommand_RejectsNewlineInCommand(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	_, err := server.QueueCommand("DEV001", "INFO\nINJECTED")
+	if !errors.Is(err, ErrInvalidCommandField) {
+		t.Errorf("expected ErrInvalidCommandField, got %v", err)
+	}
+}
+
+func TestSendUserAddCommand_RejectsNewlineInFields(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	_, err := server.SendUserAddCommand("DEV001", "1", "Alice\nINJECTED", 0, "")
+	if !errors.Is(err, ErrInvalidCommandField) {
+		t.Errorf("expected ErrInvalidCommandField for name with newline, got %v", err)
+	}
+
+	_, err = server.SendUserAddCommand("DEV001", "1\n2", "Alice", 0, "")
+	if !errors.Is(err, ErrInvalidCommandField) {
+		t.Errorf("expected ErrInvalidCommandField for pin with newline, got %v", err)
+	}
+}
+
+func TestSendShellCommand_RejectsNewline(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	_, err := server.SendShellCommand("DEV001", "reboot\nrm -rf /")
+	if !errors.Is(err, ErrInvalidCommandField) {
+		t.Errorf("expected ErrInvalidCommandField, got %v", err)
+	}
+}
+
+func TestPendingCommands_CountedTowardLimit(t *testing.T) {
+	server := NewADMSServer(WithMaxCommandsPerDevice(2))
+	defer server.Close()
+
+	sn := "PENDING01"
+	if err := server.RegisterDevice(sn); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Queue 2 commands (hits the limit).
+	for i := range 2 {
+		if _, err := server.QueueCommand(sn, fmt.Sprintf("CMD_%d", i)); err != nil {
+			t.Fatalf("QueueCommand %d failed: %v", i, err)
+		}
+	}
+
+	// Drain moves them to pendingCommands.
+	_ = server.DrainCommands(sn)
+
+	// Queue is empty, but 2 pending commands exist — still at the limit.
+	_, err := server.QueueCommand(sn, "CMD_NEW")
+	if !errors.Is(err, ErrCommandQueueFull) {
+		t.Errorf("expected ErrCommandQueueFull (pending counted toward limit), got %v", err)
+	}
+}
+
+func TestClose_DeliversLiveContextToCallbacks(t *testing.T) {
+	ctxErrs := make(chan error, 10)
+	server := NewADMSServer(
+		WithOnDeviceInfo(func(ctx context.Context, _ string, _ map[string]string) {
+			ctxErrs <- ctx.Err()
+		}),
+	)
+
+	if err := server.RegisterDevice("DEV001"); err != nil {
+		t.Fatalf("RegisterDevice failed: %v", err)
+	}
+
+	// Dispatch a callback.
+	infoBody := "~DeviceName=TestDev\nMAC=00:11:22:33:44:55"
+	req := httptest.NewRequest(http.MethodPost,
+		"/iclock/cdata?SN=DEV001", strings.NewReader(infoBody))
+	w := httptest.NewRecorder()
+	server.HandleCData(w, req)
+
+	// Close drains the callback queue; callbacks should receive a live context.
+	server.Close()
+
+	select {
+	case err := <-ctxErrs:
+		if err != nil {
+			t.Errorf("expected live context (nil Err) during callback drain, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for callback")
 	}
 }
