@@ -189,34 +189,37 @@ zkadms.WithOnCommandResult(func(ctx context.Context, result zkadms.CommandResult
 
 ```go
 // Queue a custom command (returns ErrCommandQueueFull if limit reached)
-err := server.QueueCommand("DEVICE001", "CHECK")
+_, err := server.QueueCommand("DEVICE001", "CHECK")
 
 // Request device information
-err = server.SendInfoCommand("DEVICE001")
+_, err = server.SendInfoCommand("DEVICE001")
 
 // Heartbeat / connectivity check
-err = server.SendCheckCommand("DEVICE001")
+_, err = server.SendCheckCommand("DEVICE001")
 
 // Add or update a user on the device
-err = server.SendUserAddCommand("DEVICE001", "12345", "John Doe", 0, "")
+_, err = server.SendUserAddCommand("DEVICE001", "12345", "John Doe", 0, "")
 
 // Delete a user from the device
-err = server.SendUserDeleteCommand("DEVICE001", "12345")
+_, err = server.SendUserDeleteCommand("DEVICE001", "12345")
 
 // Retrieve a device option (value arrives via device info push)
-err = server.SendGetOptionCommand("DEVICE001", "DeviceName")
+_, err = server.SendGetOptionCommand("DEVICE001", "DeviceName")
 
-// Query all users (data pushed via POST /iclock/cdata; see note below)
-err = server.SendQueryUsersCommand("DEVICE001")
+// Query all users (data pushed via POST /iclock/cdata with table=USERINFO)
+_, err = server.SendQueryUsersCommand("DEVICE001")
 
 // Execute a shell command on the device (use with caution!)
-err = server.SendShellCommand("DEVICE001", "date")
+_, err = server.SendShellCommand("DEVICE001", "date")
 
 // Request log data
-err = server.SendLogCommand("DEVICE001")
+_, err = server.SendLogCommand("DEVICE001")
 
 // Drain all pending commands for a device
 cmds := server.DrainCommands("DEVICE001")
+for _, cmd := range cmds {
+    fmt.Println(cmd.ID, cmd.Command)
+}
 ```
 
 ### Listing Connected Devices
@@ -351,7 +354,7 @@ Confirmed GET OPTION keys: `DeviceName`, `FWVersion`, `IPAddress`, `MACAddress`,
 **Important protocol notes:**
 - The ADMS datasheet documents user commands as `USER ADD` / `USER DEL`, but real devices reject these with error -1002. Use `DATA UPDATE USERINFO` / `DATA DELETE USERINFO` instead.
 - `DATA DEL USERINFO` (truncated) also fails — the full word `DELETE` is required.
-- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint. **Note:** This library currently only acknowledges `/iclock/cdata` pushes and does not parse or surface the returned data records. If you need to consume query results, you must handle and parse the `/iclock/cdata` requests yourself.
+- `DATA QUERY` commands cause the device to push data via `POST /iclock/cdata`, not via the command confirmation endpoint. The library fully parses `USERINFO` records pushed this way and dispatches them via the `WithOnQueryUsers` callback. Use `SendQueryUsersCommand` to trigger a full user dump, or `QueueCommand(sn, "DATA QUERY USERINFO PIN=1")` for a single user.
 - `Shell` commands execute on the device's Linux OS — use with extreme caution.
 
 ### Registry Payload Parsing
@@ -603,20 +606,21 @@ Creates a new ADMS server instance configured with the given options.
 | Method | Description |
 |--------|-------------|
 | `Close()` | Drain callbacks and stop the worker goroutine |
-| `RegisterDevice(serialNumber string) error` | Register a device; validates SN, respects device limit |
+| `RegisterDevice(serialNumber string, opts ...DeviceOption) error` | Register a device; validates SN, respects device limit |
 | `GetDevice(serialNumber string) *Device` | Get device information (returns a copy) |
+| `GetDeviceTimezone(serialNumber string) *time.Location` | Get the configured timezone for a device |
 | `IsDeviceOnline(serialNumber string) bool` | Check if a device is online |
-| `QueueCommand(serialNumber, command string) error` | Queue a command; respects per-device limit |
-| `DrainCommands(serialNumber string) []string` | Drain and return all pending commands |
+| `QueueCommand(serialNumber, command string) (int64, error)` | Queue a command; validates device, fields, and per-device limit |
+| `DrainCommands(serialNumber string) []CommandEntry` | Drain and return all pending commands |
 | `PendingCommandsCount(serialNumber string) int` | Return the number of queued commands without draining |
-| `SendInfoCommand(serialNumber string) error` | Queue an INFO command |
-| `SendCheckCommand(serialNumber string) error` | Queue a CHECK (heartbeat) command |
-| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) error` | Queue a DATA UPDATE USERINFO command |
-| `SendUserDeleteCommand(serialNumber, pin string) error` | Queue a DATA DELETE USERINFO command |
-| `SendGetOptionCommand(serialNumber, key string) error` | Queue a GET OPTION FROM command |
-| `SendQueryUsersCommand(serialNumber string) error` | Queue a DATA QUERY USERINFO command |
-| `SendShellCommand(serialNumber, command string) error` | Queue a Shell command (use with caution) |
-| `SendLogCommand(serialNumber string) error` | Queue a LOG command |
+| `SendInfoCommand(serialNumber string) (int64, error)` | Queue an INFO command |
+| `SendCheckCommand(serialNumber string) (int64, error)` | Queue a CHECK (heartbeat) command |
+| `SendUserAddCommand(serialNumber, pin, name string, privilege int, card string) (int64, error)` | Queue a DATA UPDATE USERINFO command |
+| `SendUserDeleteCommand(serialNumber, pin string) (int64, error)` | Queue a DATA DELETE USERINFO command |
+| `SendGetOptionCommand(serialNumber, key string) (int64, error)` | Queue a GET OPTION FROM command |
+| `SendQueryUsersCommand(serialNumber string) (int64, error)` | Queue a DATA QUERY USERINFO command |
+| `SendShellCommand(serialNumber, command string) (int64, error)` | Queue a Shell command (use with caution) |
+| `SendLogCommand(serialNumber string) (int64, error)` | Queue a LOG command |
 | `ListDevices() []*Device` | List all registered devices (returns copies) |
 | `ServeHTTP(w, r)` | `http.Handler` implementation — routes to endpoint handlers |
 | `HandleCData(w, r)` | Handle `/iclock/cdata` requests |

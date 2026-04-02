@@ -300,14 +300,14 @@ func TestCommandHandler_UnknownDevice(t *testing.T) {
 	server := newTestServer(t) // no devices registered
 	handler := commandHandler(server)
 
-	// QueueCommand succeeds even for unknown serials (it just queues
-	// the command for later pickup), so we expect 200.
+	// QueueCommand now rejects unknown devices with ErrDeviceNotFound,
+	// so the command handler returns 503.
 	req := httptest.NewRequest(http.MethodPost, "/command?sn=NOSUCH&cmd=REBOOT", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 for unknown device (queue accepts it), got %d", w.Code)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 for unknown device, got %d", w.Code)
 	}
 }
 
