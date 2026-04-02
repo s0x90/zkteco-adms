@@ -4739,6 +4739,31 @@ func TestParseAttendance_NilTimezone(t *testing.T) {
 	if !rec.Timestamp.Equal(expectedBerlin) {
 		t.Errorf("expected timestamp %v, got %v", expectedBerlin, rec.Timestamp.UTC())
 	}
+
+	server.defaultTimezone = nil
+	data = "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records = server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	// With both nil, should fall back to UTC.
+	expectedUTC = time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !records[0].Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected %v, got %v", expectedUTC, records[0].Timestamp)
+	}
+}
+
+func TestDeviceLocationLocked_NilDefaultTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+	// Force defaultTimezone to nil to exercise the UTC fallback.
+	server.defaultTimezone = nil
+	server.devicesMutex.RLock()
+	loc := server.deviceLocationLocked("NONEXISTENT")
+	server.devicesMutex.RUnlock()
+	if loc != time.UTC {
+		t.Errorf("expected UTC fallback, got %v", loc)
+	}
 }
 
 func TestParseAttendance_UTC_Fallback(t *testing.T) {
