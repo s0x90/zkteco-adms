@@ -1176,7 +1176,7 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			s.logger.Debug("USERINFO records processed",
 				"count", len(users), "device", serialNumber)
 			if !s.dispatchQueryUsers(serialNumber, users) {
-				s.logger.Warn("callback queue full, user records dropped",
+				s.logger.Error("callback queue full, user records dropped",
 					"count", len(users), "device", serialNumber)
 				http.Error(w, fmt.Sprintf("FAIL: callback queue full, %d user records not processed", len(users)),
 					http.StatusServiceUnavailable)
@@ -1197,7 +1197,7 @@ func (s *ADMSServer) HandleCData(w http.ResponseWriter, r *http.Request) {
 			if len(body) > 0 {
 				info := s.parseKVPairs(string(body), "\n", nil)
 				if !s.dispatchDeviceInfo(serialNumber, info) {
-					s.logger.Warn("callback queue full, device info dropped",
+					s.logger.Error("callback queue full, device info dropped",
 						"device", serialNumber)
 					http.Error(w, "FAIL: callback queue full, device info not processed",
 						http.StatusServiceUnavailable)
@@ -1281,7 +1281,7 @@ func (s *ADMSServer) HandleDeviceCmd(w http.ResponseWriter, r *http.Request) {
 			"queued_cmd", result.QueuedCommand)
 
 		if !s.dispatchCommandResult(result) {
-			s.logger.Warn("callback queue full, command result dropped",
+			s.logger.Error("callback queue full, command result dropped",
 				"device", serialNumber, "id", result.ID)
 			http.Error(w, fmt.Sprintf("FAIL: callback queue full, command result %d not processed", result.ID),
 				http.StatusServiceUnavailable)
@@ -1777,7 +1777,7 @@ func (s *ADMSServer) HandleRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 		s.devicesMutex.Unlock()
 		if !s.dispatchRegistry(serialNumber, info) {
-			s.logger.Warn("callback queue full, registry info dropped",
+			s.logger.Error("callback queue full, registry info dropped",
 				"device", serialNumber)
 			http.Error(w, "FAIL: callback queue full, registry info not processed",
 				http.StatusServiceUnavailable)
