@@ -4704,6 +4704,68 @@ func TestParseAttendance_DefaultTimezone(t *testing.T) {
 	}
 }
 
+func TestParseAttendance_NilTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+
+	data := "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records := server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec := records[0]
+
+	//  09:00 UTC
+	expectedUTC := time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !rec.Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected timestamp %v, got %v", expectedUTC, rec.Timestamp.UTC())
+	}
+
+	berlinTZ, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.defaultTimezone = berlinTZ
+	records = server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	rec = records[0]
+
+	// 09:00 Berlin (UTC+2 in summer CEST) = 07:00 UTC
+	expectedBerlin := time.Date(2024, 6, 15, 9, 0, 0, 0, berlinTZ)
+	if !rec.Timestamp.Equal(expectedBerlin) {
+		t.Errorf("expected timestamp %v, got %v", expectedBerlin, rec.Timestamp.UTC())
+	}
+
+	server.defaultTimezone = nil
+	data = "123\t2024-06-15 09:00:00\t0\t15\t0"
+	records = server.parseAttendanceRecords(data, "DEV001", nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	// With both nil, should fall back to UTC.
+	expectedUTC = time.Date(2024, 6, 15, 9, 0, 0, 0, time.UTC)
+	if !records[0].Timestamp.Equal(expectedUTC) {
+		t.Errorf("expected %v, got %v", expectedUTC, records[0].Timestamp)
+	}
+}
+
+func TestDeviceLocationLocked_NilDefaultTimezone(t *testing.T) {
+	server := NewADMSServer()
+	defer server.Close()
+	// Force defaultTimezone to nil to exercise the UTC fallback.
+	server.defaultTimezone = nil
+	server.devicesMutex.RLock()
+	loc := server.deviceLocationLocked("NONEXISTENT")
+	server.devicesMutex.RUnlock()
+	if loc != time.UTC {
+		t.Errorf("expected UTC fallback, got %v", loc)
+	}
+}
+
 func TestParseAttendance_UTC_Fallback(t *testing.T) {
 	server := NewADMSServer()
 	defer server.Close()
