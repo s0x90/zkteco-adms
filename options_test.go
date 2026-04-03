@@ -278,7 +278,7 @@ func TestWithMaxDevices_ZeroMeansUnlimited(t *testing.T) {
 	server := NewADMSServer(WithMaxDevices(0))
 	defer server.Close()
 
-	// Should be able to register many devices with 0 (default/unlimited).
+	// Should be able to register many devices with 0 meaning unlimited.
 	for i := range 50 {
 		sn := "DEV" + strings.Repeat("A", i+1)
 		if len(sn) > 64 {
