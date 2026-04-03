@@ -14,10 +14,12 @@
 //	http.Handle("/iclock/", server)
 //	http.ListenAndServe(":8080", nil)
 //
-// The server implements three main endpoints:
-//   - /iclock/cdata - receives attendance logs and device data
+// The server implements five endpoints:
+//   - /iclock/cdata - receives attendance logs, device info, and user query results
+//   - /iclock/registry - handles device registration and capability payloads
 //   - /iclock/getrequest - handles device polling for commands
 //   - /iclock/devicecmd - receives command execution confirmations
+//   - /iclock/inspect - returns JSON device summary (opt-in via [WithEnableInspect])
 //
 // Call Close when the server is no longer needed to drain the callback queue.
 package zkadms
