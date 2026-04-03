@@ -3,6 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/s0x90/zkteco-adms.svg)](https://pkg.go.dev/github.com/s0x90/zkteco-adms)
 [![Test](https://github.com/s0x90/zkteco-adms/actions/workflows/test.yml/badge.svg)](https://github.com/s0x90/zkteco-adms/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/s0x90/zkteco-adms/graph/badge.svg?token=4RWDG59BGM)](https://codecov.io/gh/s0x90/zkteco-adms)
+[![Go Report Card](https://goreportcard.com/badge/github.com/s0x90/zkteco-adms)](https://goreportcard.com/report/github.com/s0x90/zkteco-adms)
 
 A Go library implementing the ZKTeco ADMS protocol for ZKTeco biometric attendance devices.
 
