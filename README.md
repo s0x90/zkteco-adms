@@ -135,10 +135,12 @@ defer server.Close()
 | `WithDeviceEvictionInterval` | 5 min | How often the eviction worker checks for stale devices |
 | `WithDeviceEvictionTimeout` | 24 hours | Inactivity duration before a device is automatically evicted |
 | `WithEnableInspect` | disabled | Enable the `/iclock/inspect` debug endpoint |
+| `WithDefaultTimezone` | `time.UTC` | Fallback timezone for parsing attendance timestamps (see `WithDeviceTimezone`) |
 | `WithOnAttendance` | nil | Attendance record callback |
 | `WithOnDeviceInfo` | nil | Device info callback |
 | `WithOnRegistry` | nil | Device registry callback |
 | `WithOnCommandResult` | nil | Command confirmation callback (see [CommandResult](#commandresult)) |
+| `WithOnQueryUsers` | nil | User query callback; receives `[]UserRecord` pushed by the device |
 
 ### Handling Attendance Records
 
@@ -182,6 +184,19 @@ zkadms.WithOnCommandResult(func(ctx context.Context, result zkadms.CommandResult
     // result.ID           - Command ID assigned by the server
     // result.ReturnCode   - 0 = success, non-zero = error
     // result.Command      - Command type echoed back (e.g. "INFO", "DATA")
+})
+```
+
+### Handling User Query Results
+
+```go
+zkadms.WithOnQueryUsers(func(ctx context.Context, sn string, users []zkadms.UserRecord) {
+    // Called when a device pushes user records in response to
+    // SendQueryUsersCommand(). Data arrives via POST /iclock/cdata.
+    for _, u := range users {
+        fmt.Printf("PIN=%s Name=%s Privilege=%d Card=%s\n",
+            u.PIN, u.Name, u.Privilege, u.Card)
+    }
 })
 ```
 
@@ -257,11 +272,13 @@ http.HandleFunc("/iclock/inspect", server.HandleInspect) // opt-in: not routed b
 
 ```go
 var (
-    zkadms.ErrServerClosed       // operation attempted on a closed server
-    zkadms.ErrCallbackQueueFull  // callback queue full, dispatch timed out
-    zkadms.ErrMaxDevicesReached  // device limit reached (WithMaxDevices)
-    zkadms.ErrCommandQueueFull   // per-device command queue full (WithMaxCommandsPerDevice)
-    zkadms.ErrInvalidSerialNumber // serial number failed validation
+    zkadms.ErrServerClosed         // operation attempted on a closed server
+    zkadms.ErrCallbackQueueFull    // callback queue full, dispatch timed out
+    zkadms.ErrMaxDevicesReached    // device limit reached (WithMaxDevices)
+    zkadms.ErrCommandQueueFull     // per-device command queue full (WithMaxCommandsPerDevice)
+    zkadms.ErrInvalidSerialNumber  // serial number failed validation
+    zkadms.ErrDeviceNotFound       // operation targets an unregistered device
+    zkadms.ErrInvalidCommandField  // command field contains forbidden control characters
 )
 ```
 
@@ -573,7 +590,16 @@ Represents a single attendance transaction with `UserID`, `Timestamp`, `Status`,
 JSON representation of a device in the `/iclock/inspect` response.
 
 #### `CommandResult`
-Represents the result of a command execution reported by a device. Fields: `SerialNumber`, `ID` (int64), `ReturnCode` (int, 0 = success), and `Command` (string).
+Represents the result of a command execution reported by a device. Fields: `SerialNumber`, `ID` (int64), `ReturnCode` (int, 0 = success), `Command` (string), and `QueuedCommand` (original queued command string for correlation).
+
+#### `CommandEntry`
+Pairs a pre-assigned command ID with the command string. Returned by `DrainCommands`.
+
+#### `UserRecord`
+Represents a user record returned by a device in response to a `DATA QUERY USERINFO` command. Fields: `PIN`, `Name`, `Privilege` (int), `Card`, `Password`.
+
+#### `DeviceOption`
+A function that configures a `Device` during registration. Obtained via `WithDevice*` functions (e.g. `WithDeviceTimezone`).
 
 ### Constructor
 
@@ -596,10 +622,12 @@ Creates a new ADMS server instance configured with the given options.
 | `WithDeviceEvictionInterval(time.Duration)` | Set stale-device check interval |
 | `WithDeviceEvictionTimeout(time.Duration)` | Set inactivity threshold for eviction |
 | `WithEnableInspect()` | Enable `/iclock/inspect` in ServeHTTP router |
+| `WithDefaultTimezone(*time.Location)` | Set fallback timezone for attendance timestamp parsing (default `time.UTC`) |
 | `WithOnAttendance(func(context.Context, AttendanceRecord))` | Set attendance callback |
 | `WithOnDeviceInfo(func(context.Context, string, map[string]string))` | Set device info callback |
 | `WithOnRegistry(func(context.Context, string, map[string]string))` | Set registry callback |
 | `WithOnCommandResult(func(context.Context, CommandResult))` | Set command confirmation callback |
+| `WithOnQueryUsers(func(context.Context, string, []UserRecord))` | Set user query callback |
 
 ### Methods
 
@@ -608,7 +636,8 @@ Creates a new ADMS server instance configured with the given options.
 | `Close()` | Drain callbacks and stop the worker goroutine |
 | `RegisterDevice(serialNumber string, opts ...DeviceOption) error` | Register a device; validates SN, respects device limit |
 | `GetDevice(serialNumber string) *Device` | Get device information (returns a copy) |
-| `GetDeviceTimezone(serialNumber string) *time.Location` | Get the configured timezone for a device |
+| `SetDeviceTimezone(serialNumber string, loc *time.Location) error` | Set per-device timezone; returns `ErrDeviceNotFound` if unknown |
+| `GetDeviceTimezone(serialNumber string) *time.Location` | Get effective timezone (device -> server default -> UTC); nil if unknown |
 | `IsDeviceOnline(serialNumber string) bool` | Check if a device is online |
 | `QueueCommand(serialNumber, command string) (int64, error)` | Queue a command; validates device, fields, and per-device limit |
 | `DrainCommands(serialNumber string) []CommandEntry` | Drain and return all pending commands |
@@ -643,16 +672,8 @@ Parses URL query parameters into a map.
 | `ErrMaxDevicesReached` | Returned by `RegisterDevice` when the device limit is reached |
 | `ErrCommandQueueFull` | Returned by `QueueCommand` when the per-device command limit is reached |
 | `ErrInvalidSerialNumber` | Returned when a serial number is empty, too long, or contains invalid characters |
-
-### Deprecated
-
-The following are retained for backward compatibility and will be removed in a future major version:
-
-- `ADMSServer.OnAttendance` field — use `WithOnAttendance` instead
-- `ADMSServer.OnDeviceInfo` field — use `WithOnDeviceInfo` instead
-- `ADMSServer.OnRegistry` field — use `WithOnRegistry` instead
-- `SendCommand()` method — use `QueueCommand` instead
-- `GetCommands()` method — use `DrainCommands` instead
+| `ErrDeviceNotFound` | Returned when an operation targets a device not registered with the server |
+| `ErrInvalidCommandField` | Returned when a command field contains control characters that could cause injection |
 
 ## Device Configuration
 
