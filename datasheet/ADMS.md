@@ -1,5 +1,13 @@
 # What is ZKTeco ADMS?
 
+Inspired by Herbin Tsobeng
+
+[Link-1](https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/)
+[Link-2](https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156)
+
+Enhanced with commands were discovered by probing a real ZKTeco device and
+observing the actual HTTP traffic 
+
 ADMS = Automatic Data Master Server (sometimes also referred to as Attendance Device Management System). It’s the proprietary communication protocol used by ZKTeco biometric and RFID terminals (fingerprint, face, card readers, etc.) to send real-time attendance and access logs to a central server.
 
 The protocol is at the heart of ZKTeco’s cloud-based attendance management. Devices don’t just store logs locally — they push logs, user data, and status updates to an ADMS server over HTTP(S).
@@ -216,12 +224,6 @@ Save logs/users in a database
 Implement authentication (commKey)
 Use HTTPS
 Add an admin dashboard
-
-
-Original:
-
-[Link-1](https://www.linkedin.com/pulse/zkteco-adms-protocol-link-your-zk-device-server-herbin-tsobeng-qg0ze/)
-[Link-2](https://stackoverflow.com/questions/65844119/zkteco-push-sdk/72994156)
 
 ---
 
