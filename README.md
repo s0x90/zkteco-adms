@@ -399,6 +399,7 @@ The server updates `Device.LastActivity` at each request from the device and mar
     - `lastActivity`: RFC3339 timestamp of last activity
     - `online`: boolean derived from last activity
     - `options`: the registry/options map
+    - `timezone`: effective timezone for timestamp parsing (device → server default → UTC)
 
 ### Attendance Record Format
 
@@ -583,7 +584,7 @@ A function that configures an `ADMSServer`. Obtained via `WithX` functions.
 Main server structure handling all protocol operations. Implements `http.Handler`.
 
 #### `Device`
-Represents a registered ZKTeco device with `SerialNumber`, `LastActivity`, and `Options` fields.
+Represents a registered ZKTeco device with `SerialNumber`, `LastActivity`, `Options`, and `Timezone` fields.
 
 #### `AttendanceRecord`
 Represents a single attendance transaction with `UserID`, `Timestamp`, `Status`, `VerifyMode`, `WorkCode`, and `SerialNumber` fields.

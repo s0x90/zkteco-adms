@@ -244,7 +244,7 @@ server := zkadms.NewADMSServer(
 http.HandleFunc("/iclock/inspect", server.HandleInspect)
 ```
 
-This returns a JSON snapshot with `serial`, `lastActivity` (RFC3339), `online` flag, and parsed `options` (from registry) for each device.
+This returns a JSON snapshot with `serial`, `lastActivity` (RFC3339), `online` flag, `timezone`, and parsed `options` (from registry) for each device.
 
 You can also query devices programmatically:
 
