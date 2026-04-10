@@ -38,3 +38,6 @@ Thumbs.db
 /database
 /commands
 /probe
+
+#AI Agents
+.opencode/
