@@ -27,6 +27,7 @@ package zkadms
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -177,7 +178,10 @@ func (s *ADMSServer) callbackWorker() {
 func (s *ADMSServer) safeCall(fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("callback panic recovered", "panic", r)
+			s.logger.Error("callback panic recovered",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
 		}
 	}()
 	fn()
