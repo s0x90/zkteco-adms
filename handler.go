@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -34,10 +35,8 @@ func (s *ADMSServer) readBody(w http.ResponseWriter, r *http.Request) ([]byte, e
 // requireMethod checks that the request method is one of the allowed methods.
 // On failure it writes a 405 response and returns false.
 func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
-	for _, m := range methods {
-		if r.Method == m {
-			return true
-		}
+	if slices.Contains(methods, r.Method) {
+		return true
 	}
 	http.Error(w, respMethodNotAllowed, http.StatusMethodNotAllowed)
 	return false
