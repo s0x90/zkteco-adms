@@ -102,9 +102,7 @@ func TestClose_ConcurrentDispatchAndClose(t *testing.T) {
 
 	// Spawn goroutines that continuously dispatch callbacks.
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				ok := server.dispatchCallback(func() {
 					executed.Add(1)
@@ -114,7 +112,7 @@ func TestClose_ConcurrentDispatchAndClose(t *testing.T) {
 				}
 				accepted.Add(1)
 			}
-		}()
+		})
 	}
 
 	// Let dispatchers run briefly, then close.
