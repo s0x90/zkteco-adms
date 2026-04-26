@@ -2,23 +2,32 @@ version: "2"
 
 run:
   go: "1.26"
+  timeout: 5m
+  tests: true
 
 linters:
   default: standard
   enable:
+    # correctness / safety
     - copyloopvar
     - errname
     - gochecknoinits
+    - makezero
+    - nilerr
+    # idiomatic / modern
+    - intrange
+    - modernize
+    - usestdlibvars
+    # style / quality
     - gocritic
     - goprintffuncname
-    - makezero
     - misspell
-    - nilerr
     - prealloc
+    - revive
     - unconvert
     - unparam
-    - usestdlibvars
     - whitespace
+
   settings:
     errcheck:
       exclude-functions:
@@ -28,13 +37,46 @@ linters:
         - fmt.Fprintln
     gocritic:
       disabled-checks:
-        - commentFormatting # we have our own style
+        - commentFormatting   # we have our own style
+        - ifElseChain
+        - singleCaseSwitch
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
     misspell:
       locale: US
     prealloc:
       simple: true
       range-loops: true
       for-loops: false
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+    staticcheck:
+      # "all" enables ST/SA/QF/S checks; modernize-style suggestions ship via QF/S.
+      checks:
+        - all
+        - -ST1000   # missing package comment - too noisy
+
   exclusions:
     presets:
       - std-error-handling
@@ -48,8 +90,24 @@ linters:
         linters:
           - errcheck
           - gocritic
+      # Tests get more leeway.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+          - gocritic
+          - revive
+          - prealloc
 
 formatters:
   enable:
     - gofmt
     - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/s0x90/zkteco-adms
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
