@@ -39,7 +39,7 @@ func validateSerialNumber(sn string) error {
 // The loc parameter specifies the timezone in which device-local timestamps
 // (the "2006-01-02 15:04:05" format) are interpreted. Unix epoch timestamps
 // are inherently UTC and are not affected by loc.
-func (s *ADMSServer) parseAttendanceRecords(data string, serialNumber string, loc *time.Location) []AttendanceRecord {
+func (s *ADMSServer) parseAttendanceRecords(data, serialNumber string, loc *time.Location) []AttendanceRecord {
 	var records []AttendanceRecord
 	var skipped int
 
