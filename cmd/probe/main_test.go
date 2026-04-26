@@ -516,11 +516,9 @@ func TestPrintSummary_ConcurrentSafe(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func(){
 			printSummary(&mu, results, queued, 1)
-		}()
+		})
 	}
 	wg.Wait()
 	t.Log("concurrent printSummary completed without panic or race")
