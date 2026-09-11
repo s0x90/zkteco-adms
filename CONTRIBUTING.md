@@ -48,6 +48,20 @@ go get -tool mvdan.cc/gofumpt@vX.Y.Z   # or `go get -tool <pkg>@<version>` for a
 cd ../.. && make tools-tidy
 ```
 
+Without `make` (for example on Windows), build the same binaries by hand and
+run the commands from the matching `lint-*` targets in the `Makefile`:
+
+```bash
+cd internal/tools
+go build -o ../../bin/ $(go list tool)
+cd ../..
+bin/deadcode -test ./...
+```
+
+If a tool bump raises the `go` directive in `internal/tools/go.mod` past the
+Go version CI installs, the tool build fails on purpose. Either keep the older
+tool version or raise the project's Go version deliberately in a separate change.
+
 4. Open a pull request against `master`.
 
 ## Code Style

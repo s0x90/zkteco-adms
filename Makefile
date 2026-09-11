@@ -7,17 +7,41 @@
 
 TOOLS_DIR := internal/tools
 BIN       := $(CURDIR)/bin
-TOOLS     := $(notdir $(shell cd $(TOOLS_DIR) && go list tool))
+
+# Tools are built with the Go on PATH, never an auto-downloaded one. If a tool
+# bump (e.g. from Dependabot) raises the tools module's `go` directive past the
+# toolchain CI installs, the build fails loudly instead of silently compiling
+# the linters with a newer Go than the library supports.
+GO_LOCAL   := GOTOOLCHAIN=local go
+TOOLS      := $(notdir $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) list tool))
+GO_VERSION := $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) env GOVERSION)
+
+# Stamp file named after the toolchain, so upgrading Go rebuilds every tool.
+# Linters compiled against an older toolchain's analysis packages can reject or
+# silently skip code that uses newer syntax.
+GO_STAMP := $(BIN)/.go-$(GO_VERSION)
 
 .PHONY: tools tools-tidy lint $(addprefix lint-,$(TOOLS)) test
 
+# If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
+# prerequisites and make would report success having done nothing.
+define require_tools
+@test -n "$(TOOLS)" || { echo "error: no tools found; 'go list tool' failed in $(TOOLS_DIR)" >&2; exit 1; }
+endef
+
 ## tools: build every tool from internal/tools/go.mod into ./bin
 tools: $(addprefix $(BIN)/,$(TOOLS))
+	$(require_tools)
 
-# One binary per tool, rebuilt only when the pins change. `go build` hits the
-# build cache, so a rebuild with unchanged pins is near-instant.
-$(BIN)/%: $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum
-	cd $(TOOLS_DIR) && go build -o $@ $$(go list tool | grep -E '(^|/)$*$$')
+# One binary per tool, rebuilt when the pins or the toolchain change. `go build`
+# hits the build cache, so a rebuild with unchanged inputs is near-instant.
+$(BIN)/%: $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum $(GO_STAMP)
+	cd $(TOOLS_DIR) && $(GO_LOCAL) build -o $@ $$($(GO_LOCAL) list tool | grep -E '(^|/)$*$$')
+
+$(GO_STAMP):
+	@mkdir -p $(BIN)
+	@rm -f $(BIN)/.go-*
+	@touch $@
 
 ## tools-tidy: tidy the tools module (use this, never `go mod tidy -modfile=...`)
 tools-tidy:
@@ -25,6 +49,7 @@ tools-tidy:
 
 ## lint: run every check CI runs
 lint: $(addprefix lint-,$(TOOLS))
+	$(require_tools)
 
 lint-golangci-lint: $(BIN)/golangci-lint
 	$(BIN)/golangci-lint run --timeout=5m ./...

@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on PR branches only. On master every merge shares the
+# same ref, so cancelling would drop earlier merges' results and coverage uploads.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
