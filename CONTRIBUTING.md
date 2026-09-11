@@ -7,10 +7,12 @@ started.
 
 - Go 1.26 or higher
 
+- `make`
+
 All lint and analysis tools (golangci-lint, gofumpt, modernize, govulncheck,
-deadcode) are pinned in `internal/tools/go.mod` and run through `go tool`, so
-nothing else needs to be installed. That module is separate from the library's
-`go.mod`, which stays dependency-free.
+deadcode) are pinned in `internal/tools/go.mod` and built into `./bin` by the
+Makefile, so nothing else needs to be installed. That module is separate from
+the library's `go.mod`, which stays dependency-free.
 
 ## Getting Started
 
@@ -27,16 +29,24 @@ go test -race ./...
 3. Run the full check suite before submitting:
 
 ```bash
-go test -race -cover ./...
-go tool -modfile=internal/tools/go.mod golangci-lint run ./...
-go tool -modfile=internal/tools/go.mod gofumpt -l .
-go tool -modfile=internal/tools/go.mod modernize ./...
-go tool -modfile=internal/tools/go.mod govulncheck ./...
-go tool -modfile=internal/tools/go.mod deadcode -test ./...
+make test
+make lint
 go build ./examples/basic ./examples/database
 ```
 
-These are exactly the checks CI runs (`.github/workflows/lint.yml`).
+`make lint` runs exactly the checks CI runs; each is also available on its own
+(`make lint-deadcode`, `make lint-golangci-lint`, ...).
+
+To bump or add a tool, work inside the tools module and never point `go get`
+or `go mod tidy` at it from the repo root with `-modfile`: that makes the go
+command treat the whole repo as the tools module and pull the published
+library from the proxy.
+
+```bash
+cd internal/tools
+go get -tool mvdan.cc/gofumpt@vX.Y.Z   # or `go get -tool <pkg>@<version>` for a new tool
+cd ../.. && make tools-tidy
+```
 
 4. Open a pull request against `master`.
 

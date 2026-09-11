@@ -9,13 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
-    # One job per tool so each shows up as its own check and they run in
-    # parallel. The tools themselves are pinned in internal/tools/go.mod (a
-    # separate module so the library's own go.mod stays dependency-free) and
-    # run through `go tool -modfile`, which gives us go.sum integrity, a
-    # go-build cache hit on repeat runs, and Dependabot bumps.
+    # One matrix entry per tool so each shows up as its own check and they run
+    # in parallel. The tools are pinned in internal/tools/go.mod and built via
+    # the Makefile, so CI and contributors run exactly the same commands.
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -24,55 +26,26 @@ jobs:
       matrix:
         include:
           - name: golangci-lint
-            run: go tool -modfile=internal/tools/go.mod golangci-lint run --timeout=5m ./...
-
+            target: lint-golangci-lint
           - name: gofumpt formatting
-            run: |
-              out="$(go tool -modfile=internal/tools/go.mod gofumpt -l .)"
-              if [ -n "$out" ]; then
-                echo "The following files are not gofumpt-formatted:"
-                echo "$out"
-                echo
-                echo "Diff:"
-                go tool -modfile=internal/tools/go.mod gofumpt -d .
-                exit 1
-              fi
-
+            target: lint-gofumpt
           - name: govulncheck
-            run: go tool -modfile=internal/tools/go.mod govulncheck ./...
-
+            target: lint-govulncheck
           - name: modernize analyzer
-            run: go tool -modfile=internal/tools/go.mod modernize ./...
-
-          # This repo is a library: the only roots are cmd/, examples/ and (via
-          # -test) the test files. Any exported symbol no test or example calls
-          # is reported as dead. That is intentional: new public API must ship
-          # with a test or an example. See CONTRIBUTING.md.
-          #
-          # deadcode exits zero even when it finds something, so fail on any
-          # output. The -f template emits GitHub workflow commands so findings
-          # show up as inline annotations on the PR diff.
+            target: lint-modernize
           - name: deadcode
-            run: |
-              out="$(go tool -modfile=internal/tools/go.mod deadcode -test \
-                -f '{{range .Funcs}}::error file={{.Position.File}},line={{.Position.Line}},col={{.Position.Col}}::unreachable func: {{.Name}}{{"\n"}}{{end}}' \
-                ./...)"
-              if [ -n "$out" ]; then
-                echo "Found dead code (exported symbols no test or example reaches):"
-                echo "$out"
-                exit 1
-              fi
+            target: lint-deadcode
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.x'
           check-latest: true
           cache-dependency-path: internal/tools/go.sum
 
       - name: ${{ matrix.name }}
-        run: ${{ matrix.run }}
+        run: make ${{ matrix.target }}

@@ -1,5 +1,7 @@
 version: 2
 updates:
+  # Actions are pinned to commit SHAs; Dependabot keeps the SHA and the
+  # version comment in sync.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -14,10 +16,3 @@ updates:
     groups:
       tools:
         patterns: ["*"]
-
-  # The library itself has zero dependencies today; this keeps the Go
-  # directive and any future dependency covered.
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
