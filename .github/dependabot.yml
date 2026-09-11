@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Lint/analysis tools pinned via `tool` directives. Bumps here can change
+  # what the linters report, so review the CI result, not just the diff.
+  - package-ecosystem: gomod
+    directory: /internal/tools
+    schedule:
+      interval: weekly
+    groups:
+      tools:
+        patterns: ["*"]
+
+  # The library itself has zero dependencies today; this keeps the Go
+  # directive and any future dependency covered.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly

@@ -6,7 +6,11 @@ started.
 ## Prerequisites
 
 - Go 1.26 or higher
-- [golangci-lint](https://golangci-lint.run/docs/welcome/install/local/) v2
+
+All lint and analysis tools (golangci-lint, gofumpt, modernize, govulncheck,
+deadcode) are pinned in `internal/tools/go.mod` and run through `go tool`, so
+nothing else needs to be installed. That module is separate from the library's
+`go.mod`, which stays dependency-free.
 
 ## Getting Started
 
@@ -24,9 +28,15 @@ go test -race ./...
 
 ```bash
 go test -race -cover ./...
-golangci-lint run ./...
+go tool -modfile=internal/tools/go.mod golangci-lint run ./...
+go tool -modfile=internal/tools/go.mod gofumpt -l .
+go tool -modfile=internal/tools/go.mod modernize ./...
+go tool -modfile=internal/tools/go.mod govulncheck ./...
+go tool -modfile=internal/tools/go.mod deadcode -test ./...
 go build ./examples/basic ./examples/database
 ```
+
+These are exactly the checks CI runs (`.github/workflows/lint.yml`).
 
 4. Open a pull request against `master`.
 
@@ -34,13 +44,19 @@ go build ./examples/basic ./examples/database
 
 - Follow standard Go conventions (`gofmt`, `goimports`).
 - The project uses `golangci-lint` v2 with the config in `.golangci.yml`.
-  Run `golangci-lint run ./...` locally to catch issues before pushing.
+  Run it locally (see above) to catch issues before pushing.
 - Keep the library at **zero external dependencies** (pure stdlib).
 - Use US English spelling in comments and strings (enforced by `misspell`).
 
 ## Tests
 
-All changes should include tests. Run the full suite with race detection:
+All changes should include tests. This is enforced for public API by the
+`deadcode` check: the library has no `main`, so its only reachability roots are
+`cmd/`, `examples/` and the test files. An exported function that no test or
+example calls is reported as dead and fails CI. If you add public API, add a
+test or an example that exercises it in the same change.
+
+Run the full suite with race detection:
 
 ```bash
 go test -race -cover ./...

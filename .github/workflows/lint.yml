@@ -10,9 +10,59 @@ permissions:
   contents: read
 
 jobs:
-  golangci:
-    name: golangci-lint
+  lint:
+    # One job per tool so each shows up as its own check and they run in
+    # parallel. The tools themselves are pinned in internal/tools/go.mod (a
+    # separate module so the library's own go.mod stays dependency-free) and
+    # run through `go tool -modfile`, which gives us go.sum integrity, a
+    # go-build cache hit on repeat runs, and Dependabot bumps.
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: golangci-lint
+            run: go tool -modfile=internal/tools/go.mod golangci-lint run --timeout=5m ./...
+
+          - name: gofumpt formatting
+            run: |
+              out="$(go tool -modfile=internal/tools/go.mod gofumpt -l .)"
+              if [ -n "$out" ]; then
+                echo "The following files are not gofumpt-formatted:"
+                echo "$out"
+                echo
+                echo "Diff:"
+                go tool -modfile=internal/tools/go.mod gofumpt -d .
+                exit 1
+              fi
+
+          - name: govulncheck
+            run: go tool -modfile=internal/tools/go.mod govulncheck ./...
+
+          - name: modernize analyzer
+            run: go tool -modfile=internal/tools/go.mod modernize ./...
+
+          # This repo is a library: the only roots are cmd/, examples/ and (via
+          # -test) the test files. Any exported symbol no test or example calls
+          # is reported as dead. That is intentional: new public API must ship
+          # with a test or an example. See CONTRIBUTING.md.
+          #
+          # deadcode exits zero even when it finds something, so fail on any
+          # output. The -f template emits GitHub workflow commands so findings
+          # show up as inline annotations on the PR diff.
+          - name: deadcode
+            run: |
+              out="$(go tool -modfile=internal/tools/go.mod deadcode -test \
+                -f '{{range .Funcs}}::error file={{.Position.File}},line={{.Position.Line}},col={{.Position.Col}}::unreachable func: {{.Name}}{{"\n"}}{{end}}' \
+                ./...)"
+              if [ -n "$out" ]; then
+                echo "Found dead code (exported symbols no test or example reaches):"
+                echo "$out"
+                exit 1
+              fi
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -22,109 +72,7 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
-          cache: true
+          cache-dependency-path: internal/tools/go.sum
 
-      # Build golangci-lint from source with the project's Go toolchain so it
-      # supports the Go language version declared in go.mod (which may be newer
-      # than the version bundled in published golangci-lint binaries).
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-
-      - name: Run golangci-lint
-        run: golangci-lint run --timeout=5m ./...
-
-  gofumpt:
-    name: gofumpt formatting
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-          check-latest: true
-          cache: true
-
-      - name: Install gofumpt
-        run: go install mvdan.cc/gofumpt@latest
-
-      - name: Run gofumpt
-        run: |
-          out="$(gofumpt -l .)"
-          if [ -n "$out" ]; then
-            echo "The following files are not gofumpt-formatted:"
-            echo "$out"
-            echo
-            echo "Diff:"
-            gofumpt -d .
-            exit 1
-          fi
-
-  govulncheck:
-    name: govulncheck
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-          check-latest: true
-          cache: true
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
-
-      - name: Run govulncheck
-        run: govulncheck ./...
-
-  modernize:
-    name: modernize analyzer
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-          check-latest: true
-          cache: true
-
-      - name: Run modernize
-        run: go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@v0.21.1 ./...
-
-  deadcode:
-    name: deadcode
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-          check-latest: true
-          cache: true
-
-      # Pinned: a new x/tools release can change what counts as dead and red an
-      # untouched repo. This is the golang.org/x/tools module version, NOT
-      # gopls' (modernize above) — the two modules version independently.
-      - name: Install deadcode
-        run: go install golang.org/x/tools/cmd/deadcode@v0.48.0
-
-      - name: Check for unreachable functions
-        run: |
-          # deadcode exits zero even when it finds something, so fail on any output.
-          out="$(deadcode -test ./...)"
-          if [ -n "$out" ]; then
-            echo "Found dead code:"
-            echo "$out"
-            exit 1
-          fi
+      - name: ${{ matrix.name }}
+        run: ${{ matrix.run }}
