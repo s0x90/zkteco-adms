@@ -82,11 +82,15 @@ tool version or raise the project's Go version deliberately in a separate change
 
 ## Tests
 
-All changes should include tests. This is enforced for public API by the
-`deadcode` check: the library has no `main`, so its only reachability roots are
-`cmd/`, `examples/` and the test files. An exported function that no test or
-example calls is reported as dead and fails CI. If you add public API, add a
-test or an example that exercises it in the same change.
+All changes should include tests. This is partly enforced by the `deadcode`
+check: the library has no `main`, so its only reachability roots are `cmd/`,
+`examples/` and the test files. An exported function or method that no test or
+example calls is reported as dead and fails CI. If you add exported functions,
+add a test or an example that exercises them in the same change.
+
+`deadcode` reports functions and methods only. Exported types, constants and
+variables are not covered by any check, so tests for those are on you and your
+reviewer.
 
 Run the full suite with race detection:
 

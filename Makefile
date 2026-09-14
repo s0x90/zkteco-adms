@@ -15,20 +15,28 @@ LINT_WORKFLOW := .github/workflows/lint.yml
 # the linters with a newer Go than the library supports.
 GO_LOCAL   := GOTOOLCHAIN=local go
 TOOLS      := $(notdir $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) list tool))
-GO_VERSION := $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) env GOVERSION)
 
-# Stamp file named after the toolchain, so upgrading Go rebuilds every tool.
-# Linters compiled against an older toolchain's analysis packages can reject or
-# silently skip code that uses newer syntax.
-GO_STAMP := $(BIN)/.go-$(GO_VERSION)
+# Stamp file named after the toolchain and platform, so upgrading Go rebuilds
+# every tool. Linters compiled against an older toolchain's analysis packages
+# can reject or silently skip code that uses newer syntax, and a checkout shared
+# across OSes (a container mounting the host's working copy) must not reuse
+# binaries built for the other platform.
+GO_PLATFORM := $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) env GOVERSION GOOS GOARCH | tr '\n' '-' | sed 's/-$$//')
+GO_STAMP    := $(BIN)/.go-$(GO_PLATFORM)
 
-.PHONY: tools tools-tidy clean lint check-ci $(addprefix lint-,$(TOOLS)) test
+.DEFAULT_GOAL := help
+
+.PHONY: help tools tools-tidy clean lint check-ci $(addprefix lint-,$(TOOLS)) test
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
 define require_tools
 @test -n "$(TOOLS)" || { echo "error: no tools found; 'go list tool' failed in $(TOOLS_DIR)" >&2; exit 1; }
 endef
+
+## help: list available targets
+help:
+	@grep -hE '^## ' $(MAKEFILE_LIST) | sed 's/^## //'
 
 ## tools: build every tool from internal/tools/go.mod into ./bin
 tools: $(addprefix $(BIN)/,$(TOOLS))
@@ -55,7 +63,7 @@ $(GO_STAMP):
 ## clean: remove built tool binaries
 clean:
 	rm -f $(BIN)/* $(BIN)/.go-*
-	-rmdir $(BIN)
+	@rmdir $(BIN) 2>/dev/null || true
 
 ## tools-tidy: tidy the tools module (use this, never `go mod tidy -modfile=...`)
 tools-tidy:
@@ -110,9 +118,10 @@ lint-govulncheck: $(BIN)/govulncheck
 	$(BIN)/govulncheck ./...
 
 # This repo is a library: the only reachability roots are cmd/, examples/ and
-# (via -test) the test files. Any exported symbol no test or example calls is
-# reported as dead. That is intentional: new public API must ship with a test
-# or an example. See CONTRIBUTING.md.
+# (via -test) the test files. Any exported FUNCTION OR METHOD no test or
+# example calls is reported as dead. That is intentional: new exported funcs
+# must ship with a test or an example. Exported types, constants and variables
+# are NOT covered by this tool. See CONTRIBUTING.md.
 #
 # deadcode exits zero even when it finds something, so fail on any output. The
 # -f template emits GitHub workflow commands so findings show up as inline
