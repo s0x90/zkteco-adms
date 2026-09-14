@@ -34,8 +34,14 @@ make lint
 go build ./examples/basic ./examples/database
 ```
 
-`make lint` runs exactly the checks CI runs; each is also available on its own
-(`make lint-deadcode`, `make lint-golangci-lint`, ...).
+`make lint` runs exactly the checks CI runs and reports every failing check,
+not just the first. Each is also available on its own (`make lint-deadcode`,
+`make lint-golangci-lint`, ...).
+
+Adding or removing a tool means touching three places: the `tool` directives in
+`internal/tools/go.mod`, the matching `lint-*` target in the `Makefile`, and the
+CI matrix in `.github/workflows/lint.yml`. `make check-ci` fails when they
+disagree and runs as part of `make lint` and in CI.
 
 To bump or add a tool, work inside the tools module and never point `go get`
 or `go mod tidy` at it from the repo root with `-modfile`: that makes the go

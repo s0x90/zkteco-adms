@@ -37,6 +37,8 @@ jobs:
             target: lint-modernize
           - name: deadcode
             target: lint-deadcode
+          - name: CI matrix drift
+            target: check-ci
 
     steps:
       - name: Checkout

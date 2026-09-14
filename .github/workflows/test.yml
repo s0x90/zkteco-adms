@@ -35,11 +35,6 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Build examples
-        run: |
-          go build -o /dev/null ./examples/basic
-          go build -o /dev/null ./examples/database
-
       - name: Test
         run: go test -v -race -coverprofile=coverage.out ./...
 

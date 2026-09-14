@@ -5,8 +5,9 @@
 # from the repo root (via -modfile) makes the go command treat the whole repo as
 # the tools module and pull the *published* library from the proxy. Never do that.
 
-TOOLS_DIR := internal/tools
-BIN       := $(CURDIR)/bin
+TOOLS_DIR     := internal/tools
+BIN           := $(CURDIR)/bin
+LINT_WORKFLOW := .github/workflows/lint.yml
 
 # Tools are built with the Go on PATH, never an auto-downloaded one. If a tool
 # bump (e.g. from Dependabot) raises the tools module's `go` directive past the
@@ -21,7 +22,7 @@ GO_VERSION := $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) env GOVERSION)
 # silently skip code that uses newer syntax.
 GO_STAMP := $(BIN)/.go-$(GO_VERSION)
 
-.PHONY: tools tools-tidy lint $(addprefix lint-,$(TOOLS)) test
+.PHONY: tools tools-tidy lint check-ci $(addprefix lint-,$(TOOLS)) test
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
@@ -36,7 +37,15 @@ tools: $(addprefix $(BIN)/,$(TOOLS))
 # One binary per tool, rebuilt when the pins or the toolchain change. `go build`
 # hits the build cache, so a rebuild with unchanged inputs is near-instant.
 $(BIN)/%: $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum $(GO_STAMP)
-	cd $(TOOLS_DIR) && $(GO_LOCAL) build -o $@ $$($(GO_LOCAL) list tool | grep -E '(^|/)$*$$')
+	@pkg=$$(cd $(TOOLS_DIR) && $(GO_LOCAL) list tool | grep -E '(^|/)$*$$'); \
+	 n=$$(printf '%s' "$$pkg" | grep -c . || true); \
+	 test "$$n" -eq 1 || { \
+	   echo "error: expected exactly one tool directive matching '$*' in $(TOOLS_DIR)/go.mod, found $$n" >&2; \
+	   test "$$n" -eq 0 || echo "$$pkg" >&2; \
+	   exit 1; \
+	 }; \
+	 echo "building $* from $$pkg"; \
+	 cd $(TOOLS_DIR) && $(GO_LOCAL) build -o $@ $$pkg
 
 $(GO_STAMP):
 	@mkdir -p $(BIN)
@@ -48,8 +57,30 @@ tools-tidy:
 	cd $(TOOLS_DIR) && go mod tidy
 
 ## lint: run every check CI runs
-lint: $(addprefix lint-,$(TOOLS))
+# Runs under -k so one failing tool does not hide the others, matching CI's
+# fail-fast: false matrix.
+lint:
 	$(require_tools)
+	@$(MAKE) -k check-ci $(addprefix lint-,$(TOOLS))
+
+## check-ci: fail if the tool pins, the lint targets and the CI matrix disagree
+# Three places name the tools: `tool` directives in the tools module, the
+# lint-* recipes below, and the CI matrix. A tool missing from the matrix is
+# the dangerous drift: `make lint` would run it locally while CI never does.
+check-ci:
+	$(require_tools)
+	@want=$$(printf '%s\n' $(addprefix lint-,$(TOOLS)) | sort -u); \
+	 mk=$$(grep -oE '^lint-[a-z0-9-]+' Makefile | sort -u); \
+	 ci=$$(grep -oE 'target: *lint-[a-z0-9-]+' $(LINT_WORKFLOW) | sed 's/.*: *//' | sort -u); \
+	 status=0; \
+	 [ "$$want" = "$$mk" ] || { status=1; \
+	   echo "error: $(TOOLS_DIR)/go.mod tools and Makefile lint targets disagree" >&2; }; \
+	 [ "$$want" = "$$ci" ] || { status=1; \
+	   echo "error: $(TOOLS_DIR)/go.mod tools and the CI matrix in $(LINT_WORKFLOW) disagree" >&2; }; \
+	 if [ $$status -ne 0 ]; then \
+	   echo "tools:  $$want" >&2; echo "make:   $$mk" >&2; echo "ci:     $$ci" >&2; \
+	 fi; \
+	 exit $$status
 
 lint-golangci-lint: $(BIN)/golangci-lint
 	$(BIN)/golangci-lint run --timeout=5m ./...
