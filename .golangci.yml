@@ -16,7 +16,8 @@ linters:
     - makezero
     - nilerr
     # idiomatic / modern
-    - intrange
+    # intrange is not listed: modernize's rangeint reports the same loops, and
+    # with uniq-by-line off both would fire on every one of them.
     - modernize
     - usestdlibvars
     # style / quality
@@ -27,7 +28,8 @@ linters:
     - revive
     - unconvert
     - unparam
-    - whitespace
+    # whitespace is not listed: the gofumpt formatter removes the same leading
+    # and trailing blank lines, verified for both cases.
 
   settings:
     errcheck:
