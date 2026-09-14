@@ -22,7 +22,7 @@ GO_VERSION := $(shell cd $(TOOLS_DIR) && $(GO_LOCAL) env GOVERSION)
 # silently skip code that uses newer syntax.
 GO_STAMP := $(BIN)/.go-$(GO_VERSION)
 
-.PHONY: tools tools-tidy lint check-ci $(addprefix lint-,$(TOOLS)) test
+.PHONY: tools tools-tidy clean lint check-ci $(addprefix lint-,$(TOOLS)) test
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
@@ -52,6 +52,11 @@ $(GO_STAMP):
 	@rm -f $(BIN)/.go-*
 	@touch $@
 
+## clean: remove built tool binaries
+clean:
+	rm -f $(BIN)/* $(BIN)/.go-*
+	-rmdir $(BIN)
+
 ## tools-tidy: tidy the tools module (use this, never `go mod tidy -modfile=...`)
 tools-tidy:
 	cd $(TOOLS_DIR) && go mod tidy
@@ -67,6 +72,8 @@ lint:
 # Three places name the tools: `tool` directives in the tools module, the
 # lint-* recipes below, and the CI matrix. A tool missing from the matrix is
 # the dangerous drift: `make lint` would run it locally while CI never does.
+# This target also asserts its own matrix entry exists, otherwise deleting that
+# entry would disable the check without any signal.
 check-ci:
 	$(require_tools)
 	@want=$$(printf '%s\n' $(addprefix lint-,$(TOOLS)) | sort -u); \
@@ -77,6 +84,8 @@ check-ci:
 	   echo "error: $(TOOLS_DIR)/go.mod tools and Makefile lint targets disagree" >&2; }; \
 	 [ "$$want" = "$$ci" ] || { status=1; \
 	   echo "error: $(TOOLS_DIR)/go.mod tools and the CI matrix in $(LINT_WORKFLOW) disagree" >&2; }; \
+	 grep -qE 'target: *check-ci' $(LINT_WORKFLOW) || { status=1; \
+	   echo "error: $(LINT_WORKFLOW) has no 'target: check-ci' entry, so CI would not run this check" >&2; }; \
 	 if [ $$status -ne 0 ]; then \
 	   echo "tools:  $$want" >&2; echo "make:   $$mk" >&2; echo "ci:     $$ci" >&2; \
 	 fi; \

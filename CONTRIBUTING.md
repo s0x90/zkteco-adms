@@ -43,6 +43,8 @@ Adding or removing a tool means touching three places: the `tool` directives in
 CI matrix in `.github/workflows/lint.yml`. `make check-ci` fails when they
 disagree and runs as part of `make lint` and in CI.
 
+`make clean` removes the built tool binaries in `./bin`.
+
 To bump or add a tool, work inside the tools module and never point `go get`
 or `go mod tidy` at it from the repo root with `-modfile`: that makes the go
 command treat the whole repo as the tools module and pull the published

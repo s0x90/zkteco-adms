@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# The installed Go must satisfy go.mod on its own. Without this, bumping the go
+# directive past the version installed below would silently download and build
+# with a different toolchain than the one CI reports.
+env:
+  GOTOOLCHAIN: local
+
 # Cancel superseded runs on PR branches only. On master every merge shares the
 # same ref, so cancelling would drop earlier merges' results and coverage uploads.
 concurrency:
