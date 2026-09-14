@@ -35,8 +35,6 @@ jobs:
         include:
           - name: golangci-lint
             target: lint-golangci-lint
-          - name: gofumpt formatting
-            target: lint-gofumpt
           - name: govulncheck
             target: lint-govulncheck
           - name: deadcode

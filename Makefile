@@ -26,7 +26,7 @@ GO_STAMP    := $(BIN)/.go-$(GO_PLATFORM)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help tools tools-tidy clean lint check-ci check-lint-expands $(addprefix lint-,$(TOOLS)) test
+.PHONY: help tools tools-tidy clean fmt lint check-ci check-lint-expands $(addprefix lint-,$(TOOLS)) test
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
@@ -108,16 +108,7 @@ check-ci: check-lint-expands
 	 exit $$status
 
 lint-golangci-lint: $(BIN)/golangci-lint
-	$(BIN)/golangci-lint run --timeout=5m ./...
-
-lint-gofumpt: $(BIN)/gofumpt
-	@out="$$($(BIN)/gofumpt -l .)"; \
-	if [ -n "$$out" ]; then \
-		echo "The following files are not gofumpt-formatted:"; \
-		echo "$$out"; echo; echo "Diff:"; \
-		$(BIN)/gofumpt -d .; \
-		exit 1; \
-	fi
+	$(BIN)/golangci-lint run ./...
 
 lint-govulncheck: $(BIN)/govulncheck
 	$(BIN)/govulncheck ./...
@@ -142,6 +133,10 @@ lint-deadcode: $(BIN)/deadcode
 		echo "$$out"; \
 		exit 1; \
 	fi
+
+## fmt: apply the configured formatters (gofumpt, goimports) in place
+fmt: $(BIN)/golangci-lint
+	$(BIN)/golangci-lint fmt ./...
 
 ## test: run the test suite with race detection (COVERPROFILE=file writes coverage)
 COVERPROFILE ?=

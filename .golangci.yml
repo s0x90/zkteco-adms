@@ -1,7 +1,8 @@
 version: "2"
 
 run:
-  go: "1.26"
+  # No `go:` here on purpose: golangci-lint then reads the go directive from
+  # go.mod, so the language version has one source of truth.
   timeout: 5m
   tests: true
 
@@ -100,7 +101,8 @@ linters:
 
 formatters:
   enable:
-    - gofmt
+    # gofumpt is a strict superset of gofmt, so gofmt would be redundant.
+    - gofumpt
     - goimports
   settings:
     goimports:
