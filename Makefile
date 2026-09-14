@@ -26,7 +26,7 @@ GO_STAMP    := $(BIN)/.go-$(GO_PLATFORM)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help tools tools-tidy clean lint check-ci $(addprefix lint-,$(TOOLS)) test
+.PHONY: help tools tools-tidy clean lint check-ci check-lint-expands $(addprefix lint-,$(TOOLS)) test
 
 # If `go list tool` failed, TOOLS is empty, so `tools` and `lint` would have no
 # prerequisites and make would report success having done nothing.
@@ -82,7 +82,15 @@ lint:
 # the dangerous drift: `make lint` would run it locally while CI never does.
 # This target also asserts its own matrix entry exists, otherwise deleting that
 # entry would disable the check without any signal.
-check-ci:
+# CI runs the individual lint-* targets, never the `lint` wrapper, so a broken
+# wrapper would only surface on a contributor's machine. `-n` expands the whole
+# graph, recursion included, without running a single tool. The MAKELEVEL guard
+# stops the expansion from re-entering itself.
+check-lint-expands:
+	@test "$(MAKELEVEL)" -gt 0 || $(MAKE) -n lint >/dev/null || { \
+	   echo "error: 'make lint' does not expand cleanly" >&2; exit 1; }
+
+check-ci: check-lint-expands
 	$(require_tools)
 	@want=$$(printf '%s\n' $(addprefix lint-,$(TOOLS)) | sort -u); \
 	 mk=$$(grep -oE '^lint-[a-z0-9-]+' Makefile | sort -u); \
@@ -111,9 +119,6 @@ lint-gofumpt: $(BIN)/gofumpt
 		exit 1; \
 	fi
 
-lint-modernize: $(BIN)/modernize
-	$(BIN)/modernize ./...
-
 lint-govulncheck: $(BIN)/govulncheck
 	$(BIN)/govulncheck ./...
 
@@ -138,6 +143,7 @@ lint-deadcode: $(BIN)/deadcode
 		exit 1; \
 	fi
 
-## test: run the test suite with race detection
+## test: run the test suite with race detection (COVERPROFILE=file writes coverage)
+COVERPROFILE ?=
 test:
-	go test -race -cover ./...
+	go test -race -cover $(if $(COVERPROFILE),-coverprofile=$(COVERPROFILE)) ./...

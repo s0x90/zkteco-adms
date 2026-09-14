@@ -39,8 +39,6 @@ jobs:
             target: lint-gofumpt
           - name: govulncheck
             target: lint-govulncheck
-          - name: modernize analyzer
-            target: lint-modernize
           - name: deadcode
             target: lint-deadcode
           - name: CI matrix drift

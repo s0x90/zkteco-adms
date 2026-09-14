@@ -9,8 +9,8 @@ started.
 
 - `make`
 
-All lint and analysis tools (golangci-lint, gofumpt, modernize, govulncheck,
-deadcode) are pinned in `internal/tools/go.mod` and built into `./bin` by the
+All lint and analysis tools (golangci-lint, gofumpt, govulncheck, deadcode)
+are pinned in `internal/tools/go.mod` and built into `./bin` by the
 Makefile, so nothing else needs to be installed. That module is separate from
 the library's `go.mod`, which stays dependency-free.
 
@@ -31,7 +31,7 @@ go test -race ./...
 ```bash
 make test
 make lint
-go build ./examples/basic ./examples/database
+go build ./...
 ```
 
 `make lint` runs exactly the checks CI runs and reports every failing check,

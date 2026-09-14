@@ -108,5 +108,9 @@ formatters:
         - github.com/s0x90/zkteco-adms
 
 issues:
+  # Report every finding, not just the first per line. With the default (true),
+  # a modernize finding is dropped whenever another linter reports on the same
+  # line, which silently hid modernize results from this config.
+  uniq-by-line: false
   max-issues-per-linter: 0
   max-same-issues: 0

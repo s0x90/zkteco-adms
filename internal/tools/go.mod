@@ -5,7 +5,6 @@ go 1.26.2
 tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	golang.org/x/tools/cmd/deadcode
-	golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize
 	golang.org/x/vuln/cmd/govulncheck
 	mvdan.cc/gofumpt
 )
