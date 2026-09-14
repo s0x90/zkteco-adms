@@ -110,8 +110,15 @@ check-ci: check-lint-expands
 lint-golangci-lint: $(BIN)/golangci-lint
 	$(BIN)/golangci-lint run ./...
 
+# govulncheck downloads the vulnerability database on every run, so an offline
+# machine gets a red `make lint` that looks like a finding. Say which it is.
 lint-govulncheck: $(BIN)/govulncheck
-	$(BIN)/govulncheck ./...
+	@out=$$($(BIN)/govulncheck ./... 2>&1); status=$$?; \
+	 echo "$$out"; \
+	 if [ $$status -ne 0 ] && echo "$$out" | grep -q 'fetching vulnerabilities'; then \
+	   echo "note: could not reach the vulnerability database; this is a network failure, not a finding" >&2; \
+	 fi; \
+	 exit $$status
 
 # This repo is a library: the only reachability roots are cmd/, examples/ and
 # (via -test) the test files. Any exported FUNCTION OR METHOD no test or

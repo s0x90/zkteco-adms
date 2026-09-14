@@ -38,7 +38,9 @@ Formatting (gofumpt and goimports) is enforced by golangci-lint; `make fmt`
 applies it in place.
 
 `make lint` runs exactly the checks CI runs and reports every failing check,
-not just the first. Each is also available on its own (`make lint-deadcode`,
+not just the first. It needs network access: govulncheck downloads the
+vulnerability database on every run, and a fetch error there is a network
+problem, not a finding in your code. Each is also available on its own (`make lint-deadcode`,
 `make lint-golangci-lint`, ...).
 
 Adding or removing a tool means touching three places: the `tool` directives in
