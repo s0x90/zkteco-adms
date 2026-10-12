@@ -85,6 +85,8 @@ Setiap callback dimulai dengan:
 
 PIN tidak pernah dipakai tanpa SN → company.
 
+**PIN yang belum punya karyawan di KAPI (keputusan: perilaku lama dipertahankan).** User, template, foto, dan absensi dari PIN seperti itu dibuang; server hanya mencatat satu baris log (SN, PIN, jenis data, waktu; tanpa isi biometrik). Alat membalas OK sehingga umumnya tidak mengirim ulang. Data di alat tetap ada. Pemulihan dilakukan manual setelah karyawan didaftarkan di web: aksi "Download User" (`DATA QUERY USERINFO`, atau `DATA QUERY USERINFO PIN=n` untuk satu PIN) untuk user dan template, serta `DATA QUERY ATTLOG` dengan rentang waktu untuk absensi. Hasil query itu masuk lewat jalur biasa. Penampung otomatis (tabel `mst_a_device_unmatched` dan penyapu) sengaja tidak dibuat; dapat ditambahkan kemudian tanpa mengubah desain lain.
+
 ### 5.3 Jalur tulis (alat → DB)
 
 **Absensi.** Satu transaksi:
