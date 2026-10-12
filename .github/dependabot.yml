@@ -16,3 +16,10 @@ updates:
     groups:
       tools:
         patterns: ["*"]
+
+  # SQLite driver for the database example (its own module, so the library's
+  # go.mod stays dependency-free).
+  - package-ecosystem: gomod
+    directory: /examples/database
+    schedule:
+      interval: weekly

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -269,19 +270,8 @@ func TestLogMiddleware_WithLargeResponseBody(t *testing.T) {
 
 // ---------- AttendanceStore tests ----------
 
-func TestNewAttendanceStore(t *testing.T) {
-	store := NewAttendanceStore()
-	if store == nil {
-		t.Fatal("NewAttendanceStore returned nil")
-	}
-	records := store.GetRecords()
-	if len(records) != 0 {
-		t.Errorf("expected 0 records, got %d", len(records))
-	}
-}
-
 func TestAttendanceStore_SaveAndGet(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
 	rec := zkadms.AttendanceRecord{
@@ -293,11 +283,14 @@ func TestAttendanceStore_SaveAndGet(t *testing.T) {
 		SerialNumber: "DEV001",
 	}
 
-	if err := store.SaveAttendance(rec); err != nil {
+	if err := store.SaveAttendance(t.Context(), rec); err != nil {
 		t.Fatalf("SaveAttendance failed: %v", err)
 	}
 
-	records := store.GetRecords()
+	records, err := store.GetRecords(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(records))
 	}
@@ -307,52 +300,45 @@ func TestAttendanceStore_SaveAndGet(t *testing.T) {
 	if records[0].SerialNumber != "DEV001" {
 		t.Errorf("expected SerialNumber DEV001, got %s", records[0].SerialNumber)
 	}
-}
-
-func TestAttendanceStore_GetRecordsReturnsCopy(t *testing.T) {
-	store := NewAttendanceStore()
-	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
-
-	if err := store.SaveAttendance(zkadms.AttendanceRecord{
-		UserID: "USER001", Timestamp: ts, SerialNumber: "DEV001",
-	}); err != nil {
-		t.Fatal(err)
+	if !records[0].Timestamp.Equal(ts) {
+		t.Errorf("expected Timestamp %s, got %s", ts, records[0].Timestamp)
 	}
-
-	records := store.GetRecords()
-	records[0].UserID = "MODIFIED"
-
-	original := store.GetRecords()
-	if original[0].UserID != "USER001" {
-		t.Error("GetRecords should return a copy; original was modified")
+	if records[0].VerifyMode != 1 {
+		t.Errorf("expected VerifyMode 1, got %d", records[0].VerifyMode)
 	}
 }
 
 func TestAttendanceStore_GetRecordsByUser(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
-	for _, uid := range []string{"USER001", "USER002", "USER001", "USER003"} {
-		if err := store.SaveAttendance(zkadms.AttendanceRecord{
-			UserID: uid, Timestamp: ts, SerialNumber: "DEV001",
+	for i, uid := range []string{"USER001", "USER002", "USER001", "USER003"} {
+		if err := store.SaveAttendance(t.Context(), zkadms.AttendanceRecord{
+			UserID: uid, Timestamp: ts.Add(time.Duration(i) * time.Minute), SerialNumber: "DEV001",
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	records := store.GetRecordsByUser("USER001")
+	records, err := store.GetRecordsByUser(t.Context(), "USER001")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 2 {
 		t.Errorf("expected 2 records for USER001, got %d", len(records))
 	}
 
-	records = store.GetRecordsByUser("UNKNOWN")
+	records, err = store.GetRecordsByUser(t.Context(), "UNKNOWN")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 0 {
 		t.Errorf("expected 0 records for UNKNOWN, got %d", len(records))
 	}
 }
 
 func TestAttendanceStore_GetRecordsByDateRange(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 
 	times := []time.Time{
 		time.Date(2026, 3, 16, 8, 0, 0, 0, time.UTC),  // yesterday
@@ -361,7 +347,7 @@ func TestAttendanceStore_GetRecordsByDateRange(t *testing.T) {
 		time.Date(2026, 3, 18, 8, 0, 0, 0, time.UTC),  // tomorrow
 	}
 	for i, ts := range times {
-		if err := store.SaveAttendance(zkadms.AttendanceRecord{
+		if err := store.SaveAttendance(t.Context(), zkadms.AttendanceRecord{
 			UserID: "USER001", Timestamp: ts, SerialNumber: "DEV001", Status: i,
 		}); err != nil {
 			t.Fatal(err)
@@ -371,30 +357,161 @@ func TestAttendanceStore_GetRecordsByDateRange(t *testing.T) {
 	start := time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC)
 
-	records := store.GetRecordsByDateRange(start, end)
+	records, err := store.GetRecordsByDateRange(t.Context(), start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 2 {
 		t.Errorf("expected 2 records in range, got %d", len(records))
 	}
 }
 
 func TestAttendanceStore_GetRecordsByDateRange_Empty(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 
 	start := time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC)
 
-	records := store.GetRecordsByDateRange(start, end)
+	records, err := store.GetRecordsByDateRange(t.Context(), start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 0 {
 		t.Errorf("expected 0 records, got %d", len(records))
 	}
 }
 
+func TestAttendanceStore_PersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "persist.db")
+	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
+
+	store, err := NewAttendanceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAttendance(t.Context(), zkadms.AttendanceRecord{
+		UserID: "USER001", Timestamp: ts, SerialNumber: "DEV001",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewAttendanceStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+
+	records, err := reopened.GetRecords(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].UserID != "USER001" {
+		t.Errorf("expected the record to survive a reopen, got %+v", records)
+	}
+}
+
+func TestAttendanceStore_IgnoresDuplicates(t *testing.T) {
+	store := newTestStore(t)
+	rec := zkadms.AttendanceRecord{
+		UserID: "USER001", Timestamp: time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC),
+		SerialNumber: "DEV001",
+	}
+
+	// A device retries an upload after a 503, so the same punch can arrive twice.
+	for range 3 {
+		if err := store.SaveAttendance(t.Context(), rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	records, err := store.GetRecords(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Errorf("expected duplicates to be ignored, got %d records", len(records))
+	}
+
+	// Same user and time on a different device is a distinct punch.
+	other := rec
+	other.SerialNumber = "DEV002"
+	if err := store.SaveAttendance(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+	records, _ = store.GetRecords(t.Context())
+	if len(records) != 2 {
+		t.Errorf("expected a different device to store a new record, got %d", len(records))
+	}
+}
+
+func TestAttendanceStore_DateRangeIsHalfOpen(t *testing.T) {
+	store := newTestStore(t)
+	start := time.Date(2026, 3, 17, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	seedStore(t, store,
+		zkadms.AttendanceRecord{UserID: "AT_START", Timestamp: start, SerialNumber: "D1"},
+		zkadms.AttendanceRecord{UserID: "AT_END", Timestamp: end, SerialNumber: "D1"},
+	)
+
+	records, err := store.GetRecordsByDateRange(t.Context(), start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].UserID != "AT_START" {
+		t.Errorf("expected only the record at start (end is exclusive), got %+v", records)
+	}
+}
+
+func TestNewAttendanceStore_InvalidPath(t *testing.T) {
+	_, err := NewAttendanceStore(filepath.Join(t.TempDir(), "missing-dir", "x.db"))
+	if err == nil {
+		t.Fatal("expected an error when the database directory does not exist")
+	}
+}
+
+func TestHandlers_ReturnServerErrorWhenDatabaseFails(t *testing.T) {
+	store := newTestStore(t)
+	store.Close() // closed database: every query now fails
+
+	for name, h := range map[string]http.Handler{
+		"attendance":      attendanceHandler(store),
+		"attendance-user": attendanceHandler(store),
+		"summary":         summaryHandler(store),
+	} {
+		target := "/x"
+		if name == "attendance-user" {
+			target = "/x?user_id=U1"
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		if w.Code != http.StatusInternalServerError {
+			t.Errorf("%s: expected 500, got %d", name, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "sql") {
+			t.Errorf("%s: response leaks database details: %q", name, w.Body.String())
+		}
+	}
+}
+
 // ---------- helpers ----------
+
+func newTestStore(t *testing.T) *AttendanceStore {
+	t.Helper()
+	store, err := NewAttendanceStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewAttendanceStore failed: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
 
 func seedStore(t *testing.T, store *AttendanceStore, records ...zkadms.AttendanceRecord) {
 	t.Helper()
 	for _, rec := range records {
-		if err := store.SaveAttendance(rec); err != nil {
+		if err := store.SaveAttendance(t.Context(), rec); err != nil {
 			t.Fatalf("SaveAttendance failed: %v", err)
 		}
 	}
@@ -404,7 +521,7 @@ func seedStore(t *testing.T, store *AttendanceStore, records ...zkadms.Attendanc
 // These call the real attendanceHandler() from main.go.
 
 func TestAttendanceHandler_EmptyStore(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := attendanceHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
@@ -432,7 +549,7 @@ func TestAttendanceHandler_EmptyStore(t *testing.T) {
 }
 
 func TestAttendanceHandler_AllRecords(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
 		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
@@ -463,7 +580,7 @@ func TestAttendanceHandler_AllRecords(t *testing.T) {
 }
 
 func TestAttendanceHandler_FilterByUser(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
 		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
@@ -498,7 +615,7 @@ func TestAttendanceHandler_FilterByUser(t *testing.T) {
 }
 
 func TestAttendanceHandler_FilterByUnknownUser(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
 		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, SerialNumber: "D1"},
@@ -522,7 +639,7 @@ func TestAttendanceHandler_FilterByUnknownUser(t *testing.T) {
 }
 
 func TestAttendanceHandler_RecordFields(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 14, 30, 0, 0, time.UTC)
 	seedStore(t, store,
 		zkadms.AttendanceRecord{
@@ -562,7 +679,7 @@ func TestAttendanceHandler_RecordFields(t *testing.T) {
 // These call the real summaryHandler() from main.go.
 
 func TestSummaryHandler_EmptyStore(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := summaryHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
@@ -588,7 +705,7 @@ func TestSummaryHandler_EmptyStore(t *testing.T) {
 }
 
 func TestSummaryHandler_OnlyTodayRecords(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	now := time.Now()
 
 	seedStore(t, store,
@@ -632,7 +749,7 @@ func TestSummaryHandler_OnlyTodayRecords(t *testing.T) {
 }
 
 func TestSummaryHandler_ContentType(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := summaryHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
@@ -646,7 +763,7 @@ func TestSummaryHandler_ContentType(t *testing.T) {
 }
 
 func TestSummaryHandler_ValidJSON(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	now := time.Now()
 	seedStore(t, store,
 		zkadms.AttendanceRecord{
@@ -684,7 +801,7 @@ func TestSummaryHandler_ValidJSON(t *testing.T) {
 }
 
 func TestSummaryHandler_RecordDate(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := summaryHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)
@@ -712,7 +829,7 @@ func TestSummaryHandler_RecordDate(t *testing.T) {
 
 func newTestMux(t *testing.T) (*http.ServeMux, *AttendanceStore) {
 	t.Helper()
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	server := zkadms.NewADMSServer()
 	t.Cleanup(func() { server.Close() })
 	return newMux(server, store), store
@@ -810,7 +927,7 @@ func TestRun_StartsAndStops(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, ":0")
+		errCh <- run(ctx, ":0", filepath.Join(t.TempDir(), "test.db"))
 	}()
 
 	// Give the server a moment to start listening.
@@ -832,7 +949,7 @@ func TestRun_InvalidAddr(t *testing.T) {
 	defer cancel()
 
 	// An obviously invalid address should make ListenAndServe fail immediately.
-	err := run(ctx, ":-1")
+	err := run(ctx, ":-1", filepath.Join(t.TempDir(), "test.db"))
 	if err == nil {
 		t.Fatal("expected error for invalid address, got nil")
 	}
@@ -854,7 +971,7 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- run(ctx, addr)
+		errCh <- run(ctx, addr, filepath.Join(t.TempDir(), "test.db"))
 	}()
 
 	// Wait for server to start using a readiness loop instead of a fixed sleep.
@@ -937,7 +1054,7 @@ func TestRun_ExercisesCallbacks(t *testing.T) {
 // ---------- concurrent access test ----------
 
 func TestAttendanceStore_ConcurrentAccess(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 
 	// Write from multiple goroutines.
@@ -946,7 +1063,7 @@ func TestAttendanceStore_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer func() { done <- struct{}{} }()
 			for j := range 10 {
-				_ = store.SaveAttendance(zkadms.AttendanceRecord{
+				_ = store.SaveAttendance(context.Background(), zkadms.AttendanceRecord{
 					UserID:       fmt.Sprintf("USER%d", id),
 					Timestamp:    ts.Add(time.Duration(j) * time.Minute),
 					SerialNumber: "DEV001",
@@ -958,7 +1075,10 @@ func TestAttendanceStore_ConcurrentAccess(t *testing.T) {
 		<-done
 	}
 
-	records := store.GetRecords()
+	records, err := store.GetRecords(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(records) != 100 {
 		t.Errorf("expected 100 records, got %d", len(records))
 	}
@@ -967,7 +1087,7 @@ func TestAttendanceStore_ConcurrentAccess(t *testing.T) {
 // ---------- attendanceHandler additional tests ----------
 
 func TestAttendanceHandler_MultipleUsers(t *testing.T) {
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	ts := time.Date(2026, 3, 17, 9, 0, 0, 0, time.UTC)
 	seedStore(t, store,
 		zkadms.AttendanceRecord{UserID: "U1", Timestamp: ts, Status: 0, SerialNumber: "D1"},
@@ -1022,7 +1142,7 @@ func (w *errWriter) Write([]byte) (int, error) {
 func TestAttendanceHandler_EncodeError(t *testing.T) {
 	t.Helper()
 
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := attendanceHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/attendance", nil)
@@ -1035,7 +1155,7 @@ func TestAttendanceHandler_EncodeError(t *testing.T) {
 func TestSummaryHandler_EncodeError(t *testing.T) {
 	t.Helper()
 
-	store := NewAttendanceStore()
+	store := newTestStore(t)
 	handler := summaryHandler(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/summary/today", nil)

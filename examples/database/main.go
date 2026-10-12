@@ -1,6 +1,10 @@
-// Command database demonstrates a ZKTeco ADMS server with an in-memory
-// attendance store and JSON query endpoints, modeled after a typical
-// database-backed integration.
+// Command database demonstrates a ZKTeco ADMS server that persists attendance
+// records to a SQLite database and exposes JSON query endpoints over them.
+//
+// Records survive restarts: they are stored in the file given by -db (default
+// attendance.db). The SQLite driver is modernc.org/sqlite, a pure-Go
+// implementation, so no cgo or system SQLite is needed. This example is its
+// own Go module so the library itself stays dependency-free.
 //
 // SECURITY WARNING: This example does NOT include any authentication or
 // authorization. The /api/attendance and /api/summary/today endpoints are
@@ -10,13 +14,17 @@
 //
 // Run with:
 //
-//	go run ./examples/database
+//	cd examples/database
+//	go run . -addr :8080 -db attendance.db
 package main
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -25,13 +33,11 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	zkadms "github.com/s0x90/zkteco-adms"
-	// Uncomment when using actual database
-	// _ "github.com/lib/pq"
+	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 )
 
 // maxLogBody is the maximum number of bytes logged for request/response bodies.
@@ -190,84 +196,133 @@ func logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// AttendanceStore demonstrates how to integrate with a database.
+// schema creates the attendance table. The UNIQUE constraint makes saving
+// idempotent: a device retries an ATTLOG upload after a 503, so the same
+// punch can arrive more than once and must not be stored twice. Timestamps are
+// stored as Unix seconds so range queries do not depend on a timezone.
+const schema = `
+CREATE TABLE IF NOT EXISTS attendance_records (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id     TEXT    NOT NULL,
+	timestamp   INTEGER NOT NULL,
+	status      INTEGER NOT NULL,
+	verify_mode INTEGER NOT NULL,
+	work_code   TEXT    NOT NULL DEFAULT '',
+	device_sn   TEXT    NOT NULL,
+	created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+	UNIQUE (device_sn, user_id, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_user_ts ON attendance_records (user_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_attendance_ts ON attendance_records (timestamp);
+`
+
+// selectColumns is the column list shared by every query so scanRecords can
+// rely on a fixed order.
+const selectColumns = `SELECT user_id, timestamp, status, verify_mode, work_code, device_sn FROM attendance_records`
+
+// AttendanceStore persists attendance records in SQLite.
 type AttendanceStore struct {
-	mu      sync.Mutex
-	records []zkadms.AttendanceRecord
-	// In a real application, you would use an actual database connection
-	// db *sql.DB
+	db *sql.DB
 }
 
-// NewAttendanceStore returns a new empty store.
-func NewAttendanceStore() *AttendanceStore {
-	return &AttendanceStore{
-		records: make([]zkadms.AttendanceRecord, 0),
+// NewAttendanceStore opens (creating if needed) the SQLite database at path
+// and ensures the schema exists. Use ":memory:" for a throwaway database.
+func NewAttendanceStore(path string) (*AttendanceStore, error) {
+	// busy_timeout makes a locked database wait instead of failing at once, and
+	// WAL lets readers proceed while a write is in flight.
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	if path == ":memory:" {
+		dsn = "file::memory:?_pragma=busy_timeout(5000)"
 	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	// A single connection keeps this example simple and correct: every
+	// connection to ":memory:" would otherwise get its own empty database, and
+	// SQLite allows only one writer at a time anyway.
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	return &AttendanceStore{db: db}, nil
 }
 
-// SaveAttendance saves an attendance record.
-func (s *AttendanceStore) SaveAttendance(record zkadms.AttendanceRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Close releases the database. Call it only after the ADMS server has been
+// closed, since callbacks still queued on the server write through this store.
+func (s *AttendanceStore) Close() error {
+	return s.db.Close()
+}
 
-	// In a real application, you would insert into a database:
-	/*
-		query := `INSERT INTO attendance_records
-				  (user_id, timestamp, status, verify_mode, work_code, device_sn)
-				  VALUES (?, ?, ?, ?, ?, ?)`
-		_, err := s.db.Exec(query,
-			record.UserID,
-			record.Timestamp,
-			record.Status,
-			record.VerifyMode,
-			record.WorkCode,
-			record.SerialNumber)
-		return err
-	*/
-
-	// For this example, we'll just store in memory
-	s.records = append(s.records, record)
-	fmt.Printf("Saved attendance record: User %s at %s from device %s\n",
+// SaveAttendance inserts an attendance record. A record for the same device,
+// user and timestamp that is already stored is ignored.
+func (s *AttendanceStore) SaveAttendance(ctx context.Context, record zkadms.AttendanceRecord) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO attendance_records
+		 (user_id, timestamp, status, verify_mode, work_code, device_sn)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		record.UserID,
+		record.Timestamp.Unix(),
+		record.Status,
+		record.VerifyMode,
+		record.WorkCode,
+		record.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("insert attendance: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		log.Printf("Duplicate attendance ignored: User %s at %s from device %s",
+			record.UserID, record.Timestamp.Format(time.RFC3339), record.SerialNumber)
+		return nil
+	}
+	log.Printf("Saved attendance record: User %s at %s from device %s",
 		record.UserID, record.Timestamp.Format(time.RFC3339), record.SerialNumber)
 	return nil
 }
 
-// GetRecords returns all stored records.
-func (s *AttendanceStore) GetRecords() []zkadms.AttendanceRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	result := make([]zkadms.AttendanceRecord, len(s.records))
-	copy(result, s.records)
-	return result
+// GetRecords returns all stored records, oldest first.
+func (s *AttendanceStore) GetRecords(ctx context.Context) ([]zkadms.AttendanceRecord, error) {
+	return s.query(ctx, selectColumns+` ORDER BY timestamp, id`)
 }
 
-// GetRecordsByUser returns records for a specific user.
-func (s *AttendanceStore) GetRecordsByUser(userID string) []zkadms.AttendanceRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var result []zkadms.AttendanceRecord
-	for _, record := range s.records {
-		if record.UserID == userID {
-			result = append(result, record)
-		}
-	}
-	return result
+// GetRecordsByUser returns records for a specific user, oldest first.
+func (s *AttendanceStore) GetRecordsByUser(ctx context.Context, userID string) ([]zkadms.AttendanceRecord, error) {
+	return s.query(ctx, selectColumns+` WHERE user_id = ? ORDER BY timestamp, id`, userID)
 }
 
-// GetRecordsByDateRange returns records within a date range.
-func (s *AttendanceStore) GetRecordsByDateRange(start, end time.Time) []zkadms.AttendanceRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// GetRecordsByDateRange returns records with start <= timestamp < end, oldest
+// first.
+func (s *AttendanceStore) GetRecordsByDateRange(ctx context.Context, start, end time.Time) ([]zkadms.AttendanceRecord, error) {
+	return s.query(ctx, selectColumns+` WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp, id`,
+		start.Unix(), end.Unix())
+}
 
-	var result []zkadms.AttendanceRecord
-	for _, record := range s.records {
-		if record.Timestamp.After(start) && record.Timestamp.Before(end) {
-			result = append(result, record)
-		}
+// query runs a SELECT built from selectColumns and scans the rows.
+func (s *AttendanceStore) query(ctx context.Context, q string, args ...any) ([]zkadms.AttendanceRecord, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query attendance: %w", err)
 	}
-	return result
+	defer rows.Close()
+
+	records := make([]zkadms.AttendanceRecord, 0)
+	for rows.Next() {
+		var (
+			rec zkadms.AttendanceRecord
+			ts  int64
+		)
+		if err := rows.Scan(&rec.UserID, &ts, &rec.Status, &rec.VerifyMode, &rec.WorkCode, &rec.SerialNumber); err != nil {
+			return nil, fmt.Errorf("scan attendance: %w", err)
+		}
+		rec.Timestamp = time.Unix(ts, 0).UTC()
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate attendance: %w", err)
+	}
+	return records, nil
 }
 
 // attendanceResponse is the JSON structure for attendance API responses.
@@ -292,17 +347,27 @@ type summaryResponse struct {
 	Records []attendanceEntry `json:"records"`
 }
 
+// serverError logs err and replies with a generic 500 so database details are
+// not leaked to API clients.
+func serverError(w http.ResponseWriter, msg string, err error) {
+	log.Printf("%s: %v", msg, err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
+
 // attendanceHandler returns an http.Handler that responds with JSON
 // attendance records. If the "user_id" query parameter is set, only
 // records for that user are returned; otherwise all records are returned.
 func attendanceHandler(store *AttendanceStore) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
-		w.Header().Set("Content-Type", "application/json")
 
 		var resp attendanceResponse
 		if userID != "" {
-			records := store.GetRecordsByUser(userID)
+			records, err := store.GetRecordsByUser(r.Context(), userID)
+			if err != nil {
+				serverError(w, "Error querying attendance", err)
+				return
+			}
 			resp.UserID = userID
 			resp.Count = len(records)
 			resp.Records = make([]attendanceEntry, len(records))
@@ -314,7 +379,11 @@ func attendanceHandler(store *AttendanceStore) http.Handler {
 				}
 			}
 		} else {
-			records := store.GetRecords()
+			records, err := store.GetRecords(r.Context())
+			if err != nil {
+				serverError(w, "Error querying attendance", err)
+				return
+			}
 			resp.Total = len(records)
 			resp.Records = make([]attendanceEntry, len(records))
 			for i, rec := range records {
@@ -327,6 +396,7 @@ func attendanceHandler(store *AttendanceStore) http.Handler {
 			}
 		}
 
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			log.Printf("Error encoding attendance response: %v", err)
 		}
@@ -336,12 +406,16 @@ func attendanceHandler(store *AttendanceStore) http.Handler {
 // summaryHandler returns an http.Handler that responds with a JSON daily
 // summary of today's attendance records.
 func summaryHandler(store *AttendanceStore) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		endOfDay := startOfDay.Add(24 * time.Hour)
 
-		records := store.GetRecordsByDateRange(startOfDay, endOfDay)
+		records, err := store.GetRecordsByDateRange(r.Context(), startOfDay, endOfDay)
+		if err != nil {
+			serverError(w, "Error querying summary", err)
+			return
+		}
 
 		resp := summaryResponse{
 			Date:    startOfDay.Format("2006-01-02"),
@@ -376,18 +450,24 @@ func newMux(server *zkadms.ADMSServer, store *AttendanceStore) *http.ServeMux {
 	return mux
 }
 
-// run creates the attendance store and ADMS server, wires HTTP routes, and
-// blocks until ctx is canceled. On cancellation the HTTP server is gracefully
-// shut down and the ADMS callback queue is drained before returning.
-func run(ctx context.Context, addr string) error {
-	// Initialize the attendance store
-	store := NewAttendanceStore()
+// run opens the SQLite attendance store, creates the ADMS server, wires HTTP
+// routes, and blocks until ctx is canceled. On cancellation the HTTP server is
+// gracefully shut down, the ADMS callback queue is drained, and only then is
+// the database closed.
+func run(ctx context.Context, addr, dbPath string) error {
+	store, err := NewAttendanceStore(dbPath)
+	if err != nil {
+		return err
+	}
+	// Deferred first so it runs last: queued callbacks write to the store
+	// while server.Close drains them.
+	defer store.Close()
 
 	// Create the ADMS server with functional options
 	server := zkadms.NewADMSServer(
 		// Save attendance records to the store
 		zkadms.WithOnAttendance(func(ctx context.Context, record zkadms.AttendanceRecord) {
-			if err := store.SaveAttendance(record); err != nil {
+			if err := store.SaveAttendance(ctx, record); err != nil {
 				log.Printf("Error saving attendance: %v", err)
 			}
 		}),
@@ -414,13 +494,13 @@ func run(ctx context.Context, addr string) error {
 		}
 	}()
 
-	log.Printf("Server with database integration starting on %s\n", addr)
+	log.Printf("Server with SQLite storage (%s) starting on %s\n", dbPath, addr)
 	log.Println("Endpoints:")
 	log.Println("  /iclock/*            - ZKTeco device endpoints")
 	log.Println("  /api/attendance      - Query attendance records")
 	log.Println("  /api/summary/today   - Get today's attendance summary")
 
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 
@@ -429,38 +509,13 @@ func run(ctx context.Context, addr string) error {
 }
 
 func main() {
+	addr := flag.String("addr", ":8080", "address to listen on")
+	dbPath := flag.String("db", "attendance.db", "path to the SQLite database file")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, ":8080"); err != nil {
+	if err := run(ctx, *addr, *dbPath); err != nil {
 		log.Fatal(err)
 	}
 }
-
-// Example of how to use with an actual database (PostgreSQL):
-/*
-func initDB() (*sql.DB, error) {
-	db, err := sql.Open("postgres", "postgres://user:password@localhost/attendance?sslmode=disable")
-	if err != nil {
-		return nil, err
-	}
-
-	// Create table if not exists
-	schema := `
-	CREATE TABLE IF NOT EXISTS attendance_records (
-		id SERIAL PRIMARY KEY,
-		user_id VARCHAR(50) NOT NULL,
-		timestamp TIMESTAMP NOT NULL,
-		status INTEGER NOT NULL,
-		verify_mode INTEGER NOT NULL,
-		work_code VARCHAR(50),
-		device_sn VARCHAR(50) NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		INDEX idx_user_timestamp (user_id, timestamp),
-		INDEX idx_device_timestamp (device_sn, timestamp)
-	);
-	`
-
-	_, err = db.Exec(schema)
-	return db, err
-}
-*/

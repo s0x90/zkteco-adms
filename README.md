@@ -457,7 +457,7 @@ See the [examples](./examples) directory for complete examples:
 
 - **[basic](./examples/basic)** - Simple server with status endpoint
 - **[commands](./examples/commands)** - Device command management via REST API
-- **[database](./examples/database)** - Integration with database storage
+- **[database](./examples/database)** - Persists attendance records to SQLite and serves them over a JSON API (separate module, see below)
 
 ### Device Probe Tool
 
@@ -470,6 +470,17 @@ go run ./cmd/probe -addr :8080 -sn YOUR_SERIAL_NUMBER
 Use `-destructive` to include potentially dangerous commands (CONTROL DEVICE, SET OPTION, etc.).
 
 ### Running Examples
+
+`basic`, `commands` and `probe` live in the library module. `database` is its own Go module because it depends on a SQLite driver, so run it from its directory (the library itself stays dependency-free):
+
+```bash
+cd examples/database
+go run . -addr :8080 -db attendance.db
+curl http://localhost:8080/api/attendance?user_id=1001
+curl http://localhost:8080/api/summary/today
+```
+
+Records are stored in the `attendance.db` file and survive restarts. Repeated uploads of the same punch (device retries) are stored once.
 
 ```bash
 go run ./examples/basic
@@ -488,16 +499,40 @@ The commands example exposes a REST API for managing devices:
 go run ./examples/commands -devices ABCD12345678
 ```
 
+Open `http://localhost:8080/` for a web dashboard that shows every device as **Online** or **Offline** (online means it contacted the server within the online threshold, 2 minutes by default), lets you send sample commands (Info, Check, Query users, Get log, Sync time, Get option, or a raw command), and lists recent attendance, device-info and command-result events. It is one embedded HTML file with no external dependencies. Commands are queued and delivered when the device next polls, so results show up a few seconds later. The page has no login, so do not expose it to an untrusted network.
+
+#### Timezones
+
+Devices send wall-clock times with no timezone, so the server has to know where each device is. Set a default with `-timezone` and override per device with `SN=Zone` in `-devices` or the `PUT .../timezone` endpoint (or the "Set zone" box in the dashboard):
+
+```bash
+go run ./examples/commands -timezone Asia/Jakarta -devices HQ001,BALI01=Asia/Makassar
+curl -X PUT http://localhost:8080/api/devices/BALI01/timezone \
+     -H 'Content-Type: application/json' -d '{"timezone":"Asia/Jayapura"}'
+```
+
+"Set on server" (and `PUT .../timezone`) never contacts the device. To change the timezone stored **on the device**, use "Apply to device" (`POST .../timezone/apply`): it queues `SET OPTION TimeZone=7` (the offset in whole hours) and then `GET OPTION FROM TimeZone`, and the device's answer shows up in Recent events. The key name and format come from third-party PUSH protocol documentation, not from commands confirmed on hardware in this repository, so firmware may differ: a red `FAILED (-1002 ...)` event means the device rejected it, and the read-back shows what the device really holds. Offsets that are not whole hours (e.g. India, UTC+5:30) are refused instead of guessed, and the offset is the one in effect when you click, so it does not follow daylight saving changes. After changing it, use "Sync time" if the device clock is off.
+
+Recent events shows the parsed result of each command with the return code explained, plus the device's raw reply (`device-reply`), which includes `Content=` output such as Shell results.
+
+Only IANA names such as `Asia/Jakarta` are accepted (`UTC+7` and `Local` are rejected). This changes how the server reads the device's attendance times and what `sync-time` sends. It does not change a setting on the device, so the device's own timezone and clock must match. The setting is kept in memory: it is lost on restart (use `-devices SN=Zone` to make it permanent) and when an idle device is evicted.
+
+Note: a device registered up front with `-devices` counts as online for the first 2 minutes even if it has never connected, because registration sets its last activity to "now".
+
 Endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/` | Web dashboard (device status, sample commands, recent events) |
+| GET | `/ui/state` | JSON the dashboard polls: devices plus recent events |
 | GET | `/api/devices` | List all connected devices |
 | GET | `/api/devices/{sn}` | Device detail |
 | POST | `/api/devices/{sn}/reboot` | Reboot device |
 | POST | `/api/devices/{sn}/info` | Request device info |
 | POST | `/api/devices/{sn}/check` | Heartbeat / connectivity check |
-| POST | `/api/devices/{sn}/sync-time` | Sync device clock |
+| POST | `/api/devices/{sn}/sync-time` | Sync device clock, using the time in the device's own timezone |
+| POST | `/api/devices/{sn}/timezone/apply` | Send the device's timezone to the device itself: queues `SET OPTION TimeZone=<hours>` then `GET OPTION FROM TimeZone` to read it back (experimental, see below) |
+| PUT | `/api/devices/{sn}/timezone` | Set the timezone the server uses for this device (JSON body `{"timezone":"Asia/Jakarta"}`; empty string resets to the default) |
 | POST | `/api/devices/{sn}/clear-data` | Clear attendance data |
 | POST | `/api/devices/{sn}/clear-log` | Clear operation log |
 | POST | `/api/devices/{sn}/users` | Add/update user (JSON body) |

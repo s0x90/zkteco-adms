@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADMS Device Monitor</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --text: #1b1f27;
+    --muted: #5d6675;
+    --border: #d9dde4;
+    --accent: #1f5fd1;
+    --accent-text: #ffffff;
+    --online: #146c2e;
+    --online-bg: #dcf3e3;
+    --offline: #8a1f1f;
+    --offline-bg: #fbe3e3;
+    --warn-bg: #fff1cc;
+    --warn-text: #5c4300;
+    --ok: #146c2e;
+    --err: #8a1f1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b;
+      --surface: #1b2029;
+      --text: #e7eaf0;
+      --muted: #9aa4b5;
+      --border: #333b49;
+      --accent: #6ea0ff;
+      --accent-text: #0b1220;
+      --online: #6fdc8c;
+      --online-bg: #16361f;
+      --offline: #ff8d8d;
+      --offline-bg: #3c1b1b;
+      --warn-bg: #3d3210;
+      --warn-text: #f5d98a;
+      --ok: #6fdc8c;
+      --err: #ff8d8d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  .summary { color: var(--muted); }
+  .summary b { color: var(--text); }
+  .banner { background: var(--warn-bg); color: var(--warn-text); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .banner[hidden] { display: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .sn { font: 600 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .badge.online { color: var(--online); background: var(--online-bg); }
+  .badge.offline { color: var(--offline); background: var(--offline-bg); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 10px 0; font-size: 13px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; word-break: break-word; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .row { display: flex; gap: 6px; margin-top: 8px; }
+  button, select, input[type="text"] {
+    font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: progress; }
+  input[type="text"] { flex: 1; min-width: 0; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .result { min-height: 1.4em; margin-top: 8px; font-size: 13px; }
+  .result.ok { color: var(--ok); }
+  .result.err { color: var(--err); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .empty { background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; padding: 20px; color: var(--muted); }
+  .empty code { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.msg { word-break: break-word; }
+  tr.error td.msg { color: var(--err); font-weight: 600; }
+  tr.ok td.msg { color: var(--ok); }
+  tr.reply td { color: var(--muted); }
+  .kind { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--muted); }
+  .table-scroll { overflow-x: auto; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ADMS Device Monitor</h1>
+    <div class="summary" id="summary" aria-live="polite">Loading…</div>
+  </header>
+
+  <div class="banner" id="banner" role="alert" hidden>
+    Cannot reach the server. Retrying…
+  </div>
+
+  <datalist id="zones"></datalist>
+  <div class="grid" id="devices"></div>
+  <div class="empty" id="empty" hidden>
+    No devices yet. A device appears here after it contacts this server at
+    <code>/iclock/</code>, or start the server with <code>-devices SN1,SN2</code>.
+  </div>
+
+  <h2>Recent events</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Time</th><th>Device</th><th>Type</th><th>Details</th></tr></thead>
+      <tbody id="events"><tr><td colspan="4">No events yet.</td></tr></tbody>
+    </table>
+  </div>
+  <p class="hint">
+    Commands are queued and delivered the next time the device polls, so results
+    can take several seconds to appear above. This page has no login: anyone who
+    can open it can send commands to your devices.
+  </p>
+</div>
+
+<script>
+"use strict";
+
+// Safe sample commands. Each is a button on every device card.
+const ACTIONS = [
+  { label: "Info",        path: "info",        title: "Ask the device for its configuration" },
+  { label: "Check",       path: "check",       title: "Heartbeat / connectivity check" },
+  { label: "Query users", path: "users/query", title: "Ask the device to push its user list" },
+  { label: "Get log",     path: "log",         title: "Request log data" },
+  { label: "Sync time",   path: "sync-time",   title: "Set the device clock to this server's time" },
+];
+
+const OPTION_KEYS = [
+  "DeviceName", "FWVersion", "IPAddress", "MACAddress", "Platform",
+  "UserCount", "AttLogCount", "FPCount", "FaceCount",
+];
+
+// Suggestions for the timezone box; any IANA name is accepted.
+const ZONES = [
+  "Asia/Jakarta", "Asia/Makassar", "Asia/Jayapura", "Asia/Singapore",
+  "Asia/Kuala_Lumpur", "Asia/Bangkok", "Asia/Manila", "Asia/Dubai",
+  "Europe/London", "UTC",
+];
+
+const POLL_MS = 3000;
+
+const cards = new Map(); // serial number -> { root, update(device) }
+const $ = (id) => document.getElementById(id);
+
+function el(tag, props, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") node.className = v;
+    else node[k] = v; // textContent / title / type / ... never innerHTML
+  }
+  for (const c of children) node.append(c);
+  return node;
+}
+
+function ago(iso, now) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "unknown";
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 5) return "just now";
+  if (s < 60) return s + " s ago";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  return Math.floor(s / 86400) + " d ago";
+}
+
+// The current time in an IANA zone as "YYYY-MM-DD HH:MM:SS", or "—" if the
+// browser does not know the zone name.
+function zoneNow(tz, ms) {
+  try {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    }).format(ms);
+  } catch (_) {
+    return "—";
+  }
+}
+
+async function send(sn, path, body, method = "POST") {
+  const res = await fetch("/api/devices/" + encodeURIComponent(sn) + "/" + path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await res.json(); } catch (_) { /* non-JSON error body */ }
+  if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+  return data;
+}
+
+function makeCard(sn) {
+  const badge = el("span", { class: "badge" });
+  const dd = {
+    model: el("dd"), last: el("dd"), pending: el("dd"), tz: el("dd"), clock: el("dd"),
+  };
+  const result = el("div", { class: "result", role: "status" });
+
+  // run wraps a send() call: disables the button, reports the outcome.
+  async function run(button, text, fn) {
+    button.disabled = true;
+    result.className = "result";
+    result.textContent = "Sending…";
+    try {
+      const r = await fn();
+      result.className = "result ok";
+      result.textContent = "Queued: " + (r.command || text);
+    } catch (e) {
+      result.className = "result err";
+      result.textContent = "Failed: " + e.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const actions = el("div", { class: "actions" });
+  for (const a of ACTIONS) {
+    const b = el("button", { type: "button", textContent: a.label, title: a.title });
+    b.addEventListener("click", () => run(b, a.label, () => send(sn, a.path)));
+    actions.append(b);
+  }
+
+  const keySel = el("select", { title: "Option to read", ariaLabel: "Option to read" });
+  for (const k of OPTION_KEYS) keySel.append(el("option", { value: k, textContent: k }));
+  const keyBtn = el("button", { type: "button", textContent: "Get option" });
+  keyBtn.addEventListener("click", () =>
+    run(keyBtn, "Get option", () => send(sn, "get-option", { key: keySel.value })));
+
+  const rawIn = el("input", {
+    type: "text", placeholder: "Raw command, e.g. CHECK",
+    ariaLabel: "Raw command", autocomplete: "off", spellcheck: false,
+  });
+  const rawBtn = el("button", { type: "button", textContent: "Send", class: "primary" });
+  const sendRaw = () => {
+    const cmd = rawIn.value.trim();
+    if (!cmd) { result.className = "result err"; result.textContent = "Enter a command first."; return; }
+    run(rawBtn, cmd, () => send(sn, "command", { command: cmd }));
+  };
+  rawBtn.addEventListener("click", sendRaw);
+  rawIn.addEventListener("keydown", (e) => { if (e.key === "Enter") sendRaw(); });
+
+  // Timezone the server uses for this device. The box follows the server's
+  // value until the user edits it, so polling never overwrites what they type.
+  const tzIn = el("input", {
+    type: "text", placeholder: "e.g. Asia/Jakarta", ariaLabel: "Device timezone",
+    autocomplete: "off", spellcheck: false,
+  });
+  tzIn.setAttribute("list", "zones");
+  let tzDirty = false;
+  tzIn.addEventListener("input", () => { tzDirty = true; });
+  const tzBtn = el("button", {
+    type: "button", textContent: "Set on server",
+    title: "Changes only how this server reads the device's times. Does NOT change the device. Leave empty to use the server default.",
+  });
+  const tzApply = el("button", {
+    type: "button", textContent: "Apply to device",
+    title: "Sends SET OPTION TimeZone=<hours> to the device, then reads it back. Check Recent events for the device's answer.",
+  });
+  tzApply.addEventListener("click", () =>
+    run(tzApply, "timezone", async () => {
+      const r = await send(sn, "timezone/apply", null);
+      return { command: r.commands.join(" → ") + " (answer arrives in Recent events)" };
+    }));
+  const setTz = () => {
+    const tz = tzIn.value.trim();
+    run(tzBtn, tz, async () => {
+      const r = await send(sn, "timezone", { timezone: tz }, "PUT");
+      tzDirty = false;
+      refresh();
+      return { command: r.source === "default"
+        ? "timezone reset to server default (" + r.timezone + ")"
+        : "timezone " + r.timezone };
+    });
+  };
+  tzBtn.addEventListener("click", setTz);
+  tzIn.addEventListener("keydown", (e) => { if (e.key === "Enter") setTz(); });
+
+  const root = el("section", { class: "card", ariaLabel: "Device " + sn },
+    el("div", { class: "card-head" }, el("span", { class: "sn", textContent: sn }), badge),
+    el("dl", {},
+      el("dt", { textContent: "Model" }), dd.model,
+      el("dt", { textContent: "Last seen" }), dd.last,
+      el("dt", { textContent: "Pending" }), dd.pending,
+      el("dt", { textContent: "Timezone" }), dd.tz,
+      el("dt", { textContent: "Device time" }), dd.clock),
+    actions,
+    el("div", { class: "row" }, keySel, keyBtn),
+    el("div", { class: "row" }, rawIn, rawBtn),
+    el("div", { class: "row" }, tzIn, tzBtn),
+    el("div", { class: "row" }, tzApply),
+    el("div", { class: "hint", textContent: "“Set on server” only changes how this server reads the device's times; the device itself is unchanged. “Apply to device” sends the zone to the device (experimental, see Recent events for its answer)." }),
+    result);
+
+  return {
+    root,
+    update(d, now) {
+      badge.className = "badge " + (d.online ? "online" : "offline");
+      badge.textContent = d.online ? "Online" : "Offline";
+      const o = d.options || {};
+      dd.model.textContent = o.DeviceName || o.FWVersion || "—";
+      dd.last.textContent = ago(d.last_activity, now);
+      dd.last.title = d.last_activity;
+      dd.pending.textContent = d.pending_commands + " command(s) waiting";
+      dd.tz.textContent = d.timezone || "—";
+      dd.clock.textContent = zoneNow(d.timezone, now);
+      if (!tzDirty && document.activeElement !== tzIn) tzIn.value = d.timezone || "";
+    },
+  };
+}
+
+function renderDevices(list, now) {
+  const seen = new Set();
+  for (const d of list) {
+    seen.add(d.serial_number);
+    let card = cards.get(d.serial_number);
+    if (!card) {
+      card = makeCard(d.serial_number);
+      cards.set(d.serial_number, card);
+    }
+    card.update(d, now);
+  }
+  // Remove cards for devices that were evicted, add new ones in sorted order.
+  for (const [sn, card] of cards) {
+    if (!seen.has(sn)) { card.root.remove(); cards.delete(sn); }
+  }
+  const grid = $("devices");
+  [...seen].sort().forEach((sn, i) => {
+    const root = cards.get(sn).root;
+    if (grid.children[i] !== root) grid.insertBefore(root, grid.children[i] || null);
+  });
+  $("empty").hidden = list.length > 0;
+}
+
+function renderEvents(list) {
+  const body = $("events");
+  body.replaceChildren();
+  if (list.length === 0) {
+    body.append(el("tr", {}, el("td", { colSpan: 4, textContent: "No events yet." })));
+    return;
+  }
+  for (const e of list) {
+    const when = new Date(e.time);
+    const cls = e.kind === "device-reply" ? "reply" : (e.level === "error" ? "error" : e.level === "ok" ? "ok" : "");
+    body.append(el("tr", { class: cls },
+      el("td", { textContent: Number.isNaN(when) ? e.time : when.toLocaleTimeString(), title: e.time }),
+      el("td", { textContent: e.device }),
+      el("td", {}, el("span", { class: "kind", textContent: e.kind })),
+      el("td", { class: "msg", textContent: e.message })));
+  }
+}
+
+function renderSummary(list) {
+  const online = list.filter((d) => d.online).length;
+  const s = $("summary");
+  s.replaceChildren(
+    el("b", { textContent: String(list.length) }), " device(s) · ",
+    el("b", { textContent: String(online) }), " online · ",
+    el("b", { textContent: String(list.length - online) }), " offline");
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/ui/state", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const state = await res.json();
+    const list = state.devices.devices || [];
+    // Use the server's clock so "last seen" is right even if this computer's is off.
+    const now = Date.parse(state.server_time) || Date.now();
+    renderDevices(list, now);
+    renderEvents(state.events || []);
+    renderSummary(list);
+    $("banner").hidden = true;
+  } catch (_) {
+    $("banner").hidden = false;
+  }
+}
+
+for (const z of ZONES) $("zones").append(el("option", { value: z }));
+
+refresh();
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>

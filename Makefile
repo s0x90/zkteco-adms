@@ -146,6 +146,10 @@ fmt: $(BIN)/golangci-lint
 	$(BIN)/golangci-lint fmt ./...
 
 ## test: run the test suite with race detection (COVERPROFILE=file writes coverage)
+# examples/database is a separate module (it depends on a SQLite driver), so
+# `./...` from the root skips it; it is tested by the second command. The
+# coverage profile covers the library only.
 COVERPROFILE ?=
 test:
 	go test -race -cover $(if $(COVERPROFILE),-coverprofile=$(COVERPROFILE)) ./...
+	cd examples/database && go test -race -cover ./...

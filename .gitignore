@@ -38,6 +38,13 @@ Thumbs.db
 /database
 /commands
 /probe
+/examples/database/database
+
+# SQLite databases created by examples/database
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 #AI Agents
 .opencode/
