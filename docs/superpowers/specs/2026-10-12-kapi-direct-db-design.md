@@ -46,6 +46,8 @@ Menggantikan dua aplikasi yang sekarang harus dipelihara (logger lama "Push Logg
 
 ## 3. Arsitektur
 
+Catatan penamaan: paket logika bernama `bridge` (bukan `sync`, agar tidak bentrok dengan paket standar); poller command dan pelacak status berada di paket `bridge`.
+
 ```
 alat ──HTTP──> zkadms (library, tanpa dependensi)
                   │ callback berurutan (satu worker), 503 bila penuh
@@ -66,6 +68,7 @@ Root `go.mod` tetap tanpa dependensi. Modul `kapi/` memiliki `go.mod` sendiri de
 Netral vendor, tanpa istilah KAPI.
 
 - `table=OPERLOG` dipecah per baris: `USER` → `UserRecord` (tipe yang ada); `USERPIC` dan `BIOPHOTO` → tipe baru `UserPhoto{PIN, FileName, Type, Size, Content}` (`Content` tetap string base64, tidak di-decode); baris `OPLOG` diabaikan.
+- `table=options` (informasi alat yang dikirim alat secara berkala) berisi pasangan `key=value` yang dipisah **koma** dalam satu baris (`~DeviceName=FA01,MAC=..,FWVersion=..,IPAddress=..,FPVersion=10,FaceVersion=36,PvVersion=20,FingerFunOn=0,FaceFunOn=1,PvFunOn=1,VisilightFun=1,...`). Library sekarang mem-parse-nya per baris sehingga callback `WithOnDeviceInfo` hanya menerima satu entri; ke depan di-parse seperti `/iclock/registry` (pemisah koma, awalan `~` dibuang).
 - `table=BIODATA` → tipe baru `BioTemplate{PIN, No, Index, Valid, Duress, Type, MajorVer, MinorVer, Format, Data}`. **Semua `Type` diteruskan**; memilih jenis yang disimpan adalah tugas konsumen.
 - Callback baru dengan bentuk opsi fungsional yang sama: `WithOnOperLog(fn(ctx, sn, OperLogBatch))` (user dan foto) dan `WithOnBioData(fn(ctx, sn, []BioTemplate))`. Keduanya memakai jalur dispatch yang ada (berurutan, 503 bila antrian penuh).
 - Tes memakai fixture sintetis berbentuk sama dengan hasil capture, tanpa biometrik asli. Bentuk kiriman nyata ZAM230 dicatat di `datasheet/ADMS.md`. Semua fungsi publik baru dipanggil oleh tes agar lolos gerbang `deadcode`.
@@ -113,21 +116,21 @@ Kunci pencarian menyertakan jenis efektif: baris `type` NULL dengan `index < 100
 ### 5.4 Jalur command (DB → alat)
 - Poller (default tiap 2 detik) mengambil, untuk alat yang sedang online menurut library: `SELECT id, serial_number, content, pin_id, action FROM mst_a_device_cmd_log WHERE serial_number IN (...) AND transaction_time IS NULL AND return_value IS NULL ORDER BY commite_time, id LIMIT 100`.
 - **Claim** setiap baris dengan `UPDATE ... SET transaction_time = NOW() WHERE id = ? AND transaction_time IS NULL`; hanya bila 1 baris berubah, command dimasukkan ke antrian library. `content` divalidasi (tanpa CR/LF) oleh library.
-- ID command library dipetakan di memori ke `cmd_log.id`. Saat hasil datang: `UPDATE return_value, respone_time, message`; sukses bila `Return >= 0`. Efek samping yang dipertahankan: bila `cmd_log.id` sama dengan sebuah `mst_a_device_employee.device_employee_id` (web KAPI membuat baris alokasi dan baris command dengan ID yang sama), sukses memperbarui `status = 1` pada baris alokasi itu; command tanpa tautan (hasil penyebaran kita) tidak menyentuh tabel alokasi; balasan `INFO` → `device_name_info` pada `mst_a_device`; sukses pada aksi `Device Clear User` → hapus baris `mst_a_device_employee` alat itu.
+- ID command library dipetakan di memori ke `cmd_log.id`. Saat hasil datang: `UPDATE return_value, respone_time, message`; sukses bila `Return >= 0`. Efek samping yang dipertahankan: bila `cmd_log.id` sama dengan sebuah `mst_a_device_employee.device_employee_id` (web KAPI membuat baris alokasi dan baris command dengan ID yang sama), sukses memperbarui `status = 1` pada baris alokasi itu; command tanpa tautan (hasil penyebaran kita) tidak menyentuh tabel alokasi; `device_name_info` pada `mst_a_device` diisi dari `~DeviceName` pada pesan `options` (isi balasan `INFO` tidak tersedia karena `CommandResult` membuang `Content=`); sukses pada aksi `Device Clear User` → hapus baris `mst_a_device_employee` alat itu.
 - Baris yang sudah di-claim tetapi tidak dibalas dalam 10 menit (mis. server restart) dikembalikan ke antrian (`transaction_time = NULL`) paling banyak 3 kali; setelahnya `return_value = 'Timeout'`. Command bersifat idempoten (UPDATE / DELETE).
 - Pengiriman tidak bergantung pada kolom `status`.
 
 ### 5.5 Penyebaran ke alat lain
 Saat user atau template masuk dari alat A: cari alat B lain dalam perusahaan yang sama yang terhubung ke karyawan itu (`mst_a_device_employee`, SN ≠ A). Untuk tiap B, buat baris `mst_a_device_cmd_log` (`type_log 'Auto Update'`, `action` `Send User` / `Send Finger N` / `Send Face i` / `Send Palm i`, `pin_id`, `content`, `commite_time`, `created_by 'Auto Update'`, `trx_id = 0` seperti baris yang ada).
 - "Send User" dilewati bila sudah ada baris `(serial_number, type_log 'Auto Update', content)` yang sama (perilaku lama).
-- **Aturan kompatibilitas template:** baris legacy (`type` NULL) dikirim persis seperti API lama (`Type=2/MajorVer=12` wajah, `Type=8/MajorVer=12` palm). Baris baru (`type` terisi) hanya dikirim ke alat dengan **model sama**, yaitu firmware tanpa akhiran `-Ver…` (mis. `ZAM230-NF50VA`); alat lain dilewati dan dicatat di log.
+- **Aturan kompatibilitas template:** baris legacy (`type` NULL) dikirim persis seperti API lama (`Type=2/MajorVer=12` wajah, `Type=8/MajorVer=12` palm). Baris baru (`type` terisi) hanya dikirim ke alat yang **mendukung jenis dan versi itu**, berdasarkan pesan `table=options` alat tujuan (diverifikasi pada ZAM230: `FaceVersion=36` = `MajorVer` wajah, `PvVersion=20` = `MajorVer` palm): Type 1 ↔ `FingerFunOn=1` dan `FPVersion`; Type 2 ↔ `FaceFunOn=1`, `VisilightFun≠1`, `FaceVersion`; Type 9 ↔ `FaceFunOn=1`, `VisilightFun=1`, `FaceVersion`; Type 8 ↔ `PvFunOn=1`, `PvVersion`; Type 7 ↔ `FvFunOn=1`, `FvVersion`. Alat yang belum pernah mengirim `options` atau tidak cocok dilewati dan dicatat di log (tidak pernah menebak). Ini menggantikan aturan awal "model sama" karena lebih tepat dan memakai data yang sama dengan status alat.
 - Pengiriman yang dibuat web KAPI sendiri (`type_log 'Device Employee'`) tetap tanggung jawab KAPI; batasannya: kode itu memakai `Type=2/MajorVer=12`, tidak cocok untuk template ZAM230.
 
 ### 5.6 Status alat
 `mst_a_device.status` mencerminkan keadaan nyata: **0** offline, **1** online tanpa antrian, **2** online dengan antrian.
 - Online = ada request dari alat dalam ambang (`WithOnlineThreshold`, default 2 menit).
 - Antrian = baris `cmd_log` alat itu yang belum terkirim + command yang sudah di-claim tetapi belum dibalas.
-- Ditulis hanya saat **berpindah keadaan**, ditambah penyegaran `description` paling sering tiap beberapa detik. Deskripsi: `Connect`, `Not Connect`, `Process Sync (N menunggu)`. Saat online: `device_ip`, `firmware` ikut diperbarui; saat berpindah ke online dari offline juga `updated_date`.
+- Ditulis hanya saat **berpindah keadaan**, ditambah penyegaran `description` paling sering tiap beberapa detik. Deskripsi: `Connect`, `Not Connect`, `Process Sync (N menunggu)`. Saat online: `device_ip` dan `firmware` diperbarui dari `IPAddress` dan `FWVersion` pada pesan `options`; saat berpindah ke online dari offline juga `updated_date`.
 - Penyapu berkala (default 30 detik) menandai 0 alat milik proses ini yang melewati ambang; saat server berhenti, semua alat milik proses ini ditandai 0. **Hanya SN yang pernah dilayani proses ini yang disentuh** (tidak seperti `UpdateAllDeviceOff` yang mematikan semua alat di luar daftar pemanggil).
 
 ### 5.7 Kegagalan
