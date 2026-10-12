@@ -33,6 +33,7 @@ Menggantikan dua aplikasi yang sekarang harus dipelihara (logger lama "Push Logg
 - PIN ada di `mst_h_employee_attendance.pin_id` (tanpa `company_id`, tanpa index pada `pin_id`); perusahaan di `mst_h_employee.company_id` (ber-index); karyawan `is_delete = 1` disembunyikan; PIN kosong tampil sebagai 0.
 - `mst_a_device.device_sn` tidak unik secara struktur (saat ini tidak ada duplikat); `timezone` berformat `+07:00`; `is_active` default 0.
 - Ada 3 grup `(company, pin)` dengan lebih dari satu karyawan aktif, dan ±15% baris attendance ber-PIN NULL/0.
+- `mst_a_device_employee` adalah tabel alokasi karyawan → alat (`status` 1 = berhasil dikirim; arti `permission` belum diketahui, seluruh baris bernilai 1). Pada salinan database ini: 76 baris, 76 karyawan, hanya 1 alat, tanpa baris yatim; setiap baris tertaut satu lawan satu ke `mst_a_device_cmd_log.id`. Penyebaran antar alat belum pernah terjadi pada data ini sehingga hanya dapat diuji dengan data sintetis.
 - Tidak ada trigger. `mst_a_device_cmd_log.trx_id` NOT NULL tanpa auto_increment dan praktis tidak dipakai (nilai 0–2 pada 143 baris); korelasi memakai `id`.
 - `trx_a_presence` tidak punya unique key; index `idx_pr_employee_date (employee_id, presence_date)` tersedia.
 - Tabel template tidak punya kolom jenis / versi. **Migrasi 001 sudah dijalankan**: kolom `type`, `major_ver`, `minor_ver` (`INT NULL`) di `mst_a_employee_att_temp_face` dan `mst_a_employee_att_temp_palm`. Baris lama bernilai NULL = legacy.
@@ -110,7 +111,7 @@ Kunci pencarian menyertakan jenis efektif: baris `type` NULL dengan `index < 100
 ### 5.4 Jalur command (DB → alat)
 - Poller (default tiap 2 detik) mengambil, untuk alat yang sedang online menurut library: `SELECT id, serial_number, content, pin_id, action FROM mst_a_device_cmd_log WHERE serial_number IN (...) AND transaction_time IS NULL AND return_value IS NULL ORDER BY commite_time, id LIMIT 100`.
 - **Claim** setiap baris dengan `UPDATE ... SET transaction_time = NOW() WHERE id = ? AND transaction_time IS NULL`; hanya bila 1 baris berubah, command dimasukkan ke antrian library. `content` divalidasi (tanpa CR/LF) oleh library.
-- ID command library dipetakan di memori ke `cmd_log.id`. Saat hasil datang: `UPDATE return_value, respone_time, message`; sukses bila `Return >= 0`. Efek samping yang dipertahankan: sukses pada command ber-PIN → `mst_a_device_employee.status = 1`; balasan `INFO` → `device_name_info` pada `mst_a_device`; sukses pada aksi `Device Clear User` → hapus baris `mst_a_device_employee` alat itu.
+- ID command library dipetakan di memori ke `cmd_log.id`. Saat hasil datang: `UPDATE return_value, respone_time, message`; sukses bila `Return >= 0`. Efek samping yang dipertahankan: bila `cmd_log.id` sama dengan sebuah `mst_a_device_employee.device_employee_id` (web KAPI membuat baris alokasi dan baris command dengan ID yang sama), sukses memperbarui `status = 1` pada baris alokasi itu; command tanpa tautan (hasil penyebaran kita) tidak menyentuh tabel alokasi; balasan `INFO` → `device_name_info` pada `mst_a_device`; sukses pada aksi `Device Clear User` → hapus baris `mst_a_device_employee` alat itu.
 - Baris yang sudah di-claim tetapi tidak dibalas dalam 10 menit (mis. server restart) dikembalikan ke antrian (`transaction_time = NULL`) paling banyak 3 kali; setelahnya `return_value = 'Timeout'`. Command bersifat idempoten (UPDATE / DELETE).
 - Pengiriman tidak bergantung pada kolom `status`.
 
@@ -157,3 +158,4 @@ Per alat: arahkan Cloud Server Setting alat ke server baru; alat lain tetap di l
 4. Konstanta `approved_status_id` (auto-approved) disalin dari API lama.
 5. Jalur jari mengikuti aturan logger lama tetapi belum teruji di perangkat keras.
 6. Bagian 5.5: baris `Device Employee` buatan web KAPI tetap memakai `Type=2/MajorVer=12`.
+7. User yang didaftarkan langsung di alat tidak otomatis mendapat baris `mst_a_device_employee` untuk alat itu (perilaku lama dipertahankan). Ubah bila alat tempat mendaftar harus ikut tercatat sebagai alokasi.
